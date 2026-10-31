@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .patch_guard import PatchProposal
+from .patch_guard import FileEdit, PatchProposal, PatchSet
 
 API_URL = "https://api.meta.ai/v1/chat/completions"
 MODEL = "muse-spark-1.3"
@@ -22,6 +22,12 @@ MAX_BASELINE_CHARS = 2000
 MAX_FEEDBACK_CHARS = 1500
 ERROR_BODY_CHARS = 2000
 ERROR_DETAIL_CHARS = 500
+
+# Bounds for real-repository evidence requests (Phase 3).
+MAX_EVIDENCE_FILES = 12
+MAX_EVIDENCE_CHARS = 8000
+MAX_FAILURE_CHARS = 4000
+MAX_PATCHSET_EDITS = 5
 
 AI_MODE_ENV_VAR = "REPORESCUE_AI_MODE"
 API_KEY_ENV_VAR = "META_API_KEY"
@@ -156,6 +162,100 @@ def build_messages(
                 "'file' must be a repository-relative path under src/. 'before' "
                 "must be the exact lines to replace. 'after' is the replacement. "
                 "Do not rewrite unrelated code. Do not modify tests."
+            ),
+        },
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+def diagnose_and_propose_from_evidence(
+    *,
+    evidence_files: dict[str, str],
+    failures: list[dict[str, str]],
+    baseline_tail: str = "",
+    feedback: str | None = None,
+    api_key: str | None = None,
+) -> tuple[str, PatchSet]:
+    """Make one live Meta API call for a real repository.
+
+    ``evidence_files`` maps repository-relative paths to bounded source
+    text; ``failures`` carries parsed failing tests. Returns (diagnosis,
+    patch set). Raises MetaConfigError, MetaRateLimitError, MetaAPIError,
+    or MetaResponseError. Never returns a stub patch.
+    """
+    key = api_key or get_api_key()
+    messages = build_evidence_messages(
+        evidence_files=evidence_files,
+        failures=failures,
+        baseline_tail=baseline_tail,
+        feedback=feedback,
+    )
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "max_completion_tokens": MAX_OUTPUT_TOKENS,
+        "reasoning_effort": REASONING_EFFORT,
+    }
+    data = _post_chat_completion(key, payload)
+    content, finish_reason = _extract_content(data)
+    parsed = _parse_json_object(content, finish_reason)
+    return _to_diagnosis_and_patchset(parsed)
+
+
+def build_evidence_messages(
+    *,
+    evidence_files: dict[str, str],
+    failures: list[dict[str, str]],
+    baseline_tail: str = "",
+    feedback: str | None = None,
+) -> list[dict[str, str]]:
+    """Build bounded chat messages for a real-repository repair request."""
+    context_chunks: list[str] = []
+    used = 0
+    for path in sorted(evidence_files)[:MAX_EVIDENCE_FILES]:
+        chunk = f"--- {path} ---\n{evidence_files[path]}\n"
+        if used + len(chunk) > MAX_EVIDENCE_CHARS:
+            context_chunks.append("[truncated: remaining evidence omitted to bound request size]")
+            break
+        context_chunks.append(chunk)
+        used += len(chunk)
+    context = "\n".join(context_chunks) if context_chunks else "[no source evidence available]"
+    failure_lines: list[str] = []
+    for failure in failures[:MAX_EVIDENCE_FILES]:
+        block = (
+            f"{failure.get('test', '?')} [{failure.get('kind', '')}]: "
+            f"{failure.get('message', '')}\n{failure.get('traceback', '')}"
+        ).strip()
+        failure_lines.append(block)
+    failure_text = "\n\n".join(failure_lines)[:MAX_FAILURE_CHARS] or "[no parsed failures]"
+    user_parts = [
+        "Repository evidence (only these files may be patched; never patch tests):",
+        context,
+        "Failing tests (these failures must be fixed):",
+        failure_text,
+    ]
+    if baseline_tail:
+        user_parts += ["Test output tail:", baseline_tail[-MAX_BASELINE_CHARS:]]
+    if feedback:
+        user_parts += [
+            "Feedback on the previous attempt (do not repeat it):",
+            feedback[-MAX_FEEDBACK_CHARS:],
+        ]
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a careful code-repair assistant. Diagnose the test "
+                "failures and propose the smallest source change that fixes "
+                "them. Respond with exactly one JSON object and no other "
+                "text, with string keys 'diagnosis' and 'reason' plus an "
+                "'edits' array of 1 to "
+                f"{MAX_PATCHSET_EDITS} objects with string keys 'file', "
+                "'before', 'after'. 'file' must be a repository-relative "
+                "path to one of the evidence files. 'before' must be the "
+                "exact lines to replace. 'after' is the replacement. Never "
+                "propose edits to test files, test directories, or "
+                "configuration files. Do not rewrite unrelated code."
             ),
         },
         {"role": "user", "content": "\n\n".join(user_parts)},
@@ -343,4 +443,54 @@ def _to_diagnosis_and_proposal(payload: dict[str, Any]) -> tuple[str, PatchPropo
         before=values["before"],
         after=values["after"],
         reason=values["reason"].strip(),
+    )
+
+
+def _to_diagnosis_and_patchset(payload: dict[str, Any]) -> tuple[str, PatchSet]:
+    """Parse a real-repository repair response into (diagnosis, patch set).
+
+    Accepts the multi-edit shape (``edits`` array) and the legacy
+    single-edit shape (``file``/``before``/``after``).
+    """
+    for key in ("diagnosis", "reason"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise MetaResponseError(
+                f"Meta API output has a missing or empty {key!r}."
+            )
+    raw_edits: list[Any]
+    if "edits" in payload:
+        raw_edits = payload["edits"]
+        if not isinstance(raw_edits, list) or not raw_edits:
+            raise MetaResponseError("Meta API output has an empty 'edits' array.")
+    elif all(key in payload for key in ("file", "before", "after")):
+        raw_edits = [
+            {"file": payload["file"], "before": payload["before"], "after": payload["after"]}
+        ]
+    else:
+        raise MetaResponseError(
+            "Meta API output must contain an 'edits' array or file/before/after keys."
+        )
+    if len(raw_edits) > MAX_PATCHSET_EDITS:
+        raise MetaResponseError(
+            f"Meta API output has {len(raw_edits)} edits "
+            f"(maximum {MAX_PATCHSET_EDITS})."
+        )
+    edits: list[FileEdit] = []
+    for index, item in enumerate(raw_edits):
+        if not isinstance(item, dict):
+            raise MetaResponseError(f"Meta API edit {index} is not an object.")
+        for key in ("file", "before", "after"):
+            if not isinstance(item.get(key), str):
+                raise MetaResponseError(
+                    f"Meta API edit {index} key {key!r} must be a string."
+                )
+        file = item["file"].strip()
+        if not file:
+            raise MetaResponseError(f"Meta API edit {index} has an empty file path.")
+        if not item["before"]:
+            raise MetaResponseError(f"Meta API edit {index} has an empty 'before' block.")
+        edits.append(FileEdit(file=file, before=item["before"], after=item["after"]))
+    return payload["diagnosis"].strip(), PatchSet(
+        edits=tuple(edits), reason=payload["reason"].strip()
     )

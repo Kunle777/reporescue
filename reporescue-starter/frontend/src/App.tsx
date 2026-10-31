@@ -47,6 +47,35 @@ type IngestResult = {
   profile: RepoProfile;
   warnings: string[];
 };
+type ExecFailure = { test: string; kind: string; message: string; traceback: string };
+type ExecResult = {
+  backend: string;
+  isolation: string;
+  status: string;
+  passed: boolean | null;
+  exit_code: number | null;
+  output: string;
+  duration_ms: number;
+  failures: ExecFailure[];
+  install_ok: boolean | null;
+  install_log: string;
+};
+type RealReport = {
+  status: string;
+  repository: string;
+  commit_sha: string;
+  mode: string;
+  summary: string;
+  verdict: string;
+  diagnosis: string;
+  baseline: ExecResult;
+  verification: ExecResult;
+  patch: { edits: { file: string; before: string; after: string }[]; reason: string };
+  guard: { validated: boolean; message: string };
+  execution: { backend: string; isolation: string };
+  attempts: number;
+  limitations: string[];
+};
 
 export default function App() {
   const [report, setReport] = useState<Report | null>(null);
@@ -58,6 +87,10 @@ export default function App() {
   const [ingestLoading, setIngestLoading] = useState(false);
   const [ingestError, setIngestError] = useState("");
   const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
+  const [investLoading, setInvestLoading] = useState(false);
+  const [investError, setInvestError] = useState("");
+  const [investReport, setInvestReport] = useState<RealReport | null>(null);
+  const [showRealLogs, setShowRealLogs] = useState(false);
 
   async function runInvestigation() {
     setLoading(true);
@@ -85,6 +118,8 @@ export default function App() {
     setIngestLoading(true);
     setIngestError("");
     setIngestResult(null);
+    setInvestError("");
+    setInvestReport(null);
     try {
       const response = await fetch("/api/repos/ingest", {
         method: "POST",
@@ -102,7 +137,31 @@ export default function App() {
     }
   }
 
+  async function startRealInvestigation() {
+    if (!ingestResult) return;
+    setInvestLoading(true);
+    setInvestError("");
+    setInvestReport(null);
+    setShowRealLogs(false);
+    try {
+      const response = await fetch("/api/investigations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ingestion_id: ingestResult.ingestion_id }),
+      });
+      if (!response.ok) throw new Error(`API returned HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.status !== "complete") throw new Error(data.message || "Real investigation failed.");
+      setInvestReport(data as RealReport);
+    } catch (err) {
+      setInvestError(err instanceof Error ? err.message : "Could not reach the RepoRescue API.");
+    } finally {
+      setInvestLoading(false);
+    }
+  }
+
   const verified = report?.verdict === "TESTS_PASSED";
+  const realVerified = investReport?.verdict === "TESTS_PASSED";
 
   return (
     <div className="app-shell">
@@ -181,6 +240,36 @@ export default function App() {
               <p style={{ margin: "0.75rem 0" }}>{ingestResult.profile.structure_summary}</p>
               <div className="test-row"><div className={`test-icon ${ingestResult.profile.supported ? "pass" : "fail"}`}>{ingestResult.profile.supported ? <Check size={15} /> : <XCircle size={15} />}</div><div className="test-label"><strong>{ingestResult.profile.supported ? "Supported Python project" : "Not a supported Python project"}</strong><small>Language: {ingestResult.profile.primary_language} · Dependencies: {ingestResult.profile.dependency_format} · Tests: {ingestResult.profile.test_framework} ({ingestResult.profile.tests.count} files){ingestResult.profile.frameworks.length > 0 ? ` · ${ingestResult.profile.frameworks.join(", ")}` : ""}</small></div></div>
               {ingestResult.warnings.length > 0 && <pre className="test-output">{ingestResult.warnings.join("\n")}</pre>}
+              {ingestResult.profile.supported && <>
+                <div style={{ marginTop: "0.75rem" }}>
+                  <button className="run-button" onClick={startRealInvestigation} disabled={investLoading}>
+                    {investLoading ? <LoaderCircle className="spin" size={16} /> : <Play size={15} fill="currentColor" />}
+                    {investLoading ? "Investigating…" : "Start real investigation"}
+                  </button>
+                </div>
+                {investLoading && <div className="loading-note"><LoaderCircle size={14} className="spin" /> Running isolated tests and Meta diagnosis — this can take several minutes…</div>}
+              </>}
+            </>}
+            {investError && <div className="error-banner"><AlertTriangle size={17} /><div><strong>Could not complete real investigation</strong><p>{investError}</p></div></div>}
+            {investReport && <>
+              <div className={`verdict-banner ${realVerified ? "verdict-banner-good" : "verdict-banner-warn"}`}>
+                {realVerified ? <ShieldCheck size={21} /> : <ShieldAlert size={21} />}
+                <div><strong>{realVerified ? "Test-backed fix" : "Inconclusive result"}</strong><p>{investReport.summary}</p></div>
+              </div>
+              <div className="test-row"><div className="test-icon fail"><XCircle size={15} /></div><div className="test-label"><strong>Baseline failures</strong><small>{investReport.baseline.failures.length > 0 ? investReport.baseline.failures.map((failure) => failure.test).join(", ") : "No parsed failures"}</small></div><span className="result-label result-fail">{investReport.baseline.status.toUpperCase()}</span></div>
+              {investReport.diagnosis && <div className="patch-explanation"><span className="explanation-icon"><Zap size={14} /></span><div><strong>AI diagnosis</strong><p>{investReport.diagnosis}</p></div></div>}
+              {investReport.patch.edits.map((edit) => <div key={edit.file}>
+                <div className="file-tab"><FileCode2 size={14} /><span>{edit.file}</span></div>
+                <div className="diff">
+                  <div className="diff-line removed"><span>−</span><code>{edit.before}</code></div>
+                  <div className="diff-line added"><span>+</span><code>{edit.after}</code></div>
+                </div>
+              </div>)}
+              {investReport.patch.reason && <div className="patch-explanation"><span className="explanation-icon"><Zap size={14} /></span><div><strong>Why this change?</strong><p>{investReport.patch.reason}</p></div></div>}
+              <div className="test-row"><div className={`test-icon ${investReport.guard.validated ? "pass" : "fail"}`}>{investReport.guard.validated ? <Check size={15} /> : <XCircle size={15} />}</div><div className="test-label"><strong>Patch guard</strong><small>{investReport.guard.message}</small></div></div>
+              <div className="test-row"><div className={`test-icon ${investReport.verification.passed ? "pass" : "fail"}`}>{investReport.verification.passed ? <Check size={15} /> : <XCircle size={15} />}</div><div className="test-label"><strong>Post-patch suite</strong><small>{investReport.verification.passed ? "Verification run passed" : "Verification run did not pass"} · {investReport.execution.backend} ({investReport.execution.isolation}) · {investReport.attempts} attempt(s)</small></div><span className={`result-label ${investReport.verification.passed ? "result-pass" : "result-fail"}`}>{investReport.verification.passed ? "PASSED" : "FAILED"}</span></div>
+              <button className="logs-toggle" onClick={() => setShowRealLogs(!showRealLogs)}><Terminal size={14} /> {showRealLogs ? "Hide test output" : "View raw test output"} <ChevronDown size={14} className={showRealLogs ? "rotate" : ""} /></button>
+              {showRealLogs && <pre className="test-output">{`BASELINE\n${investReport.baseline.output}\n\nPOST-PATCH\n${investReport.verification.output}`}</pre>}
             </>}
           </section>
 

@@ -1,0 +1,8 @@
+      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND
+     2099       1    2099      20948  cons2     197610 20:20:46 /usr/bin/bash
+     2140    2099    2140      21352  cons2     197610 20:21:42 /usr/bin/PS
+     2007    1999    1999       4952  cons0     197610 20:10:22 /c/Program Files/nodejs/node
+     1881       1    1881      20196  cons0     197610 18:58:55 /usr/bin/bash
+     1999    1881    1999      10168  cons0     197610 20:10:22 /usr/bin/bash
+     1882       1    1882      19888  cons1     197610 18:58:55 /usr/bin/bash
+     2098    1882    2098      19504  cons1     197610 20:13:08 /c/Users/HP/Downloads/reporescue-starter/reporescue-starter/venv/Scripts/uvicorn

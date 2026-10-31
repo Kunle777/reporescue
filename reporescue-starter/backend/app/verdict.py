@@ -34,6 +34,32 @@ def decide_verdict(baseline: dict[str, Any], verification: dict[str, Any]) -> st
     return VERDICT_INCONCLUSIVE
 
 
+REAL_LIMITATIONS = [
+    "Only the executed test suite was run; passing it is evidence, not a proof of universal correctness.",
+    "The diagnosis and patch were proposed by an AI model and verified by independent test execution.",
+    "Untested behavior, unrun test files, and skipped tests are outside this verdict.",
+]
+
+REAL_REPORT_KEYS = frozenset(
+    {
+        "status",
+        "repository",
+        "commit_sha",
+        "mode",
+        "summary",
+        "verdict",
+        "diagnosis",
+        "baseline",
+        "verification",
+        "patch",
+        "guard",
+        "execution",
+        "attempts",
+        "limitations",
+    }
+)
+
+
 def build_report(
     *,
     scenario: str,
@@ -61,4 +87,50 @@ def build_report(
         "verification": verification,
         "patch": patch,
         "limitations": list(LIMITATIONS),
+    }
+
+
+def build_real_report(
+    *,
+    repository: str,
+    commit_sha: str,
+    mode: str,
+    diagnosis: str,
+    baseline: dict[str, Any],
+    verification: dict[str, Any],
+    patch: dict[str, Any],
+    guard: dict[str, Any],
+    execution: dict[str, Any],
+    attempts: int,
+    extra_limitations: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a real-repository investigation report.
+
+    Keys match REAL_REPORT_KEYS. A fix is verified only on a genuine
+    baseline-failed to verification-passed transition.
+    """
+    verdict = decide_verdict(baseline, verification)
+    verified = verdict == VERDICT_PASSED
+    failing = len((baseline or {}).get("failures", []))
+    return {
+        "status": "complete",
+        "repository": repository,
+        "commit_sha": commit_sha,
+        "mode": mode,
+        "summary": (
+            f"Reproduced {failing} failing test(s); the guarded patch passed "
+            "the independent verification run."
+            if verified
+            else "The failure-to-passing-test transition did not occur. "
+            "Inspect the baseline and verification output."
+        ),
+        "verdict": verdict,
+        "diagnosis": diagnosis,
+        "baseline": baseline,
+        "verification": verification,
+        "patch": patch,
+        "guard": guard,
+        "execution": execution,
+        "attempts": attempts,
+        "limitations": list(REAL_LIMITATIONS) + list(extra_limitations or []),
     }

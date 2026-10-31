@@ -8,11 +8,12 @@ from pydantic import BaseModel
 
 from .ingestion import get_ingestion, ingest_repository
 from .orchestrator import investigate as run_investigation
+from .real_investigation import investigate_repository
 
 app = FastAPI(
     title="RepoRescue API",
     description="Local-first, test-backed patch verification demo.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -33,6 +34,11 @@ class IngestRequest(BaseModel):
     ref: str | None = None
 
 
+class RealInvestigationRequest(BaseModel):
+    ingestion_id: str
+    max_attempts: int = 3
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API", "mode": "local-demo-no-model-calls"}
@@ -51,3 +57,10 @@ def ingest_repo(request: IngestRequest) -> dict[str, Any]:
 @app.get("/api/repos/{ingestion_id}")
 def get_repo(ingestion_id: str) -> dict[str, Any]:
     return get_ingestion(ingestion_id)
+
+
+@app.post("/api/investigations")
+def start_real_investigation(request: RealInvestigationRequest) -> dict[str, Any]:
+    return investigate_repository(
+        request.ingestion_id, max_attempts=max(1, min(request.max_attempts, 3))
+    )
