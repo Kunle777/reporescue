@@ -23,12 +23,41 @@ type Report = {
   patch: { file: string; before: string; after: string; reason: string };
   limitations: string[];
 };
+type RepoProfile = {
+  url: string;
+  name: string;
+  commit_sha: string;
+  ref: string | null;
+  primary_language: string;
+  supported: boolean;
+  python_requires: string | null;
+  dependency_format: string;
+  dependency_files: string[];
+  frameworks: string[];
+  test_framework: string;
+  tests: { dirs: string[]; files: string[]; count: number };
+  python_file_count: number;
+  source_dirs: string[];
+  structure_summary: string;
+  warnings: string[];
+};
+type IngestResult = {
+  status: string;
+  ingestion_id: string;
+  profile: RepoProfile;
+  warnings: string[];
+};
 
 export default function App() {
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showLogs, setShowLogs] = useState(false);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [repoRef, setRepoRef] = useState("");
+  const [ingestLoading, setIngestLoading] = useState(false);
+  const [ingestError, setIngestError] = useState("");
+  const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
 
   async function runInvestigation() {
     setLoading(true);
@@ -49,6 +78,27 @@ export default function App() {
       setError(err instanceof Error ? err.message : "Could not reach the RepoRescue API.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function connectRepository() {
+    setIngestLoading(true);
+    setIngestError("");
+    setIngestResult(null);
+    try {
+      const response = await fetch("/api/repos/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: repoUrl.trim(), ref: repoRef.trim() || null }),
+      });
+      if (!response.ok) throw new Error(`API returned HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.status !== "complete") throw new Error(data.message || "Repository ingestion failed.");
+      setIngestResult(data as IngestResult);
+    } catch (err) {
+      setIngestError(err instanceof Error ? err.message : "Could not reach the RepoRescue API.");
+    } finally {
+      setIngestLoading(false);
     }
   }
 
@@ -101,6 +151,37 @@ export default function App() {
             <div className="repo-card-divider" />
             <div className="repo-card-stat"><span>SCENARIO</span><strong>Negative discount</strong><small>Reproducible bug fixture</small></div>
             <div className="repo-card-stat"><span>VERIFICATION</span><strong className={verified ? "success-text" : ""}>{verified ? "Tests passed" : report ? "Inconclusive" : "Not run yet"}</strong><small>{report ? `${report.verification.duration_ms} ms test run` : "Awaiting investigation"}</small></div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-topline"><div><span className="panel-icon"><FolderGit2 size={16} /></span><strong>Connect a GitHub repository</strong></div><span className="panel-caption">INSPECTION ONLY</span></div>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <input
+                style={{ flex: "2 1 16rem", padding: "0.55rem 0.7rem" }}
+                placeholder="https://github.com/owner/repo"
+                value={repoUrl}
+                onChange={(event) => setRepoUrl(event.target.value)}
+                aria-label="GitHub repository URL"
+              />
+              <input
+                style={{ flex: "1 1 8rem", padding: "0.55rem 0.7rem" }}
+                placeholder="branch, tag, or commit (optional)"
+                value={repoRef}
+                onChange={(event) => setRepoRef(event.target.value)}
+                aria-label="Branch, tag, or commit"
+              />
+              <button className="run-button" onClick={connectRepository} disabled={ingestLoading || !repoUrl.trim()}>
+                {ingestLoading ? <LoaderCircle className="spin" size={16} /> : <GitPullRequest size={15} />}
+                {ingestLoading ? "Cloning…" : "Inspect repository"}
+              </button>
+            </div>
+            {ingestError && <div className="error-banner"><AlertTriangle size={17} /><div><strong>Could not inspect repository</strong><p>{ingestError}</p></div></div>}
+            {ingestResult && <>
+              <div className="file-tab"><FileCode2 size={14} /><span>{ingestResult.profile.name}</span><span className="change-count">{ingestResult.profile.commit_sha.slice(0, 7)}</span></div>
+              <p style={{ margin: "0.75rem 0" }}>{ingestResult.profile.structure_summary}</p>
+              <div className="test-row"><div className={`test-icon ${ingestResult.profile.supported ? "pass" : "fail"}`}>{ingestResult.profile.supported ? <Check size={15} /> : <XCircle size={15} />}</div><div className="test-label"><strong>{ingestResult.profile.supported ? "Supported Python project" : "Not a supported Python project"}</strong><small>Language: {ingestResult.profile.primary_language} · Dependencies: {ingestResult.profile.dependency_format} · Tests: {ingestResult.profile.test_framework} ({ingestResult.profile.tests.count} files){ingestResult.profile.frameworks.length > 0 ? ` · ${ingestResult.profile.frameworks.join(", ")}` : ""}</small></div></div>
+              {ingestResult.warnings.length > 0 && <pre className="test-output">{ingestResult.warnings.join("\n")}</pre>}
+            </>}
           </section>
 
           <div className="section-heading">
