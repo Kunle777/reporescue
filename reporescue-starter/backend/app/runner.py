@@ -19,6 +19,8 @@ def run_tests(workspace: Path) -> dict[str, Any]:
             cwd=workspace,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=TEST_TIMEOUT_SECONDS,
             check=False,
         )

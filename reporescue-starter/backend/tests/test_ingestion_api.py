@@ -195,7 +195,8 @@ def test_ingest_with_real_local_clone_end_to_end(tmp_path, monkeypatch):
 
     def git(args):
         result = subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=60
+            ["git", *args], cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
         )
         assert result.returncode == 0, result.stderr
         return result

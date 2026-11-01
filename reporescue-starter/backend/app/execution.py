@@ -410,6 +410,8 @@ class DockerBackend(ExecutionBackend):
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=DOCKER_PROBE_TIMEOUT_SECONDS,
                 check=False,
                 env=scrub_env_for_subprocess(),
@@ -437,6 +439,7 @@ class DockerBackend(ExecutionBackend):
             "--pids-limit", DOCKER_PIDS_LIMIT,
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
+            "--label", "reporescue.managed=true",
             "-v", f"{snapshot}:/repo",
             "-w", "/repo",
         ]
@@ -454,6 +457,7 @@ class DockerBackend(ExecutionBackend):
             subprocess.run(
                 ["docker", "rm", "--force", name],
                 capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=DOCKER_RM_TIMEOUT_SECONDS, check=False,
                 env=scrub_env_for_subprocess(),
             )
@@ -468,7 +472,8 @@ class DockerBackend(ExecutionBackend):
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             result = subprocess.run(
-                args, capture_output=True, text=True, timeout=timeout,
+                args, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout,
                 check=False, env=env,
             )
         except subprocess.TimeoutExpired as exc:
@@ -506,6 +511,27 @@ class DockerBackend(ExecutionBackend):
             ]
             code, out, state = self._run_container(venv_args, request.install_timeout, venv_name)
             install_log.append(f"$ python -m venv /repo/.execvenv\n{out}")
+            if state == "timeout" or code != 0:
+                return ExecutionResult(
+                    backend=self.name, isolation=self.isolation,
+                    status="timeout" if state == "timeout" else "install_error",
+                    passed=None, exit_code=code,
+                    output=_tail("\n".join(install_log)),
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    install_ok=False, install_log=_tail("\n".join(install_log)),
+                )
+            # Prune the venv's lib64 symlink inside the container. On Windows
+            # bind mounts it materializes as an entry the host can neither
+            # copy (WinError 1920) nor delete (WinError 5), which breaks
+            # work-copy creation later. The venv functions without it.
+            prune_name = self._new_container_name()
+            prune_args = self._base_args(request.snapshot, prune_name) + [
+                image, "rm", "-f", "/repo/.execvenv/lib64",
+            ]
+            code, out, state = self._run_container(
+                prune_args, request.install_timeout, prune_name
+            )
+            install_log.append(f"$ rm -f /repo/.execvenv/lib64\n{out}")
             if state == "timeout" or code != 0:
                 return ExecutionResult(
                     backend=self.name, isolation=self.isolation,
@@ -598,7 +624,8 @@ class UnsafeLocalBackend(ExecutionBackend):
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "pytest", "--version"],
-                capture_output=True, text=True, timeout=30, check=False,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30, check=False,
                 env=scrub_env_for_subprocess(),
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -638,7 +665,8 @@ class UnsafeLocalBackend(ExecutionBackend):
         if request.install_commands:
             venv_result = subprocess.run(
                 [sys.executable, "-m", "venv", str(request.snapshot / ".execvenv")],
-                capture_output=True, text=True, timeout=request.install_timeout,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=request.install_timeout,
                 check=False, env=scrub_env_for_subprocess(), cwd=request.snapshot,
             )
             if venv_result.returncode != 0:
@@ -658,7 +686,8 @@ class UnsafeLocalBackend(ExecutionBackend):
                 try:
                     result = subprocess.run(
                         [str(part) for part in rewritten],
-                        capture_output=True, text=True,
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace",
                         timeout=request.install_timeout, check=False,
                         env=_pip_env(), cwd=request.snapshot,
                     )
@@ -687,7 +716,8 @@ class UnsafeLocalBackend(ExecutionBackend):
         try:
             result = subprocess.run(
                 [str(part) for part in test_command],
-                capture_output=True, text=True, timeout=request.test_timeout,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=request.test_timeout,
                 check=False, env=scrub_env_for_subprocess(), cwd=request.snapshot,
             )
         except subprocess.TimeoutExpired as exc:

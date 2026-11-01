@@ -24,7 +24,8 @@ GIT_IDENTITY = ["-c", "user.email=test@example.com", "-c", "user.name=RepoRescue
 
 def _git(args, cwd):
     result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60
+        ["git", *args], cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
     )
     assert result.returncode == 0, result.stderr
     return result

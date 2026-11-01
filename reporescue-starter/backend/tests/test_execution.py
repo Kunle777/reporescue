@@ -204,6 +204,65 @@ def test_docker_install_failure_aborts_before_tests(tmp_path, monkeypatch):
     assert "--network" not in [part for call in calls for part in call]
 
 
+def test_docker_prunes_venv_lib64_after_creation(tmp_path, monkeypatch):
+    """The venv's lib64 symlink must be removed inside the container.
+
+    On Windows bind mounts lib64 materializes as an entry the host can
+    neither copy (WinError 1920) nor delete (WinError 5), which breaks
+    work-copy creation later. The venv functions without it.
+    """
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "version"]:
+            return _ok_result("27.0.0")
+        return _ok_result("ok")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = DockerBackend().run(
+        ExecutionRequest(
+            snapshot=tmp_path, install_commands=[["pip", "install", "pytest"]]
+        )
+    )
+
+    assert result.status == "ok"
+    rm_calls = [c for c in calls if c[-3:] == ["rm", "-f", "/repo/.execvenv/lib64"]]
+    assert len(rm_calls) == 1
+    venv_idx = next(i for i, c in enumerate(calls) if "venv" in c)
+    pip_idx = next(i for i, c in enumerate(calls) if "pip" in " ".join(c))
+    assert venv_idx < calls.index(rm_calls[0]) < pip_idx
+
+
+def test_docker_lib64_prune_failure_aborts_install(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "version"]:
+            return _ok_result("27.0.0")
+        if "venv" in args:
+            return _ok_result("venv ready")
+
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "rm: cannot remove"
+
+        return Failed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = DockerBackend().run(
+        ExecutionRequest(
+            snapshot=tmp_path, install_commands=[["pip", "install", "pytest"]]
+        )
+    )
+
+    assert result.status == "install_error"
+    assert result.install_ok is False
+    assert "lib64" in result.install_log
+
+
 def test_docker_uses_snapshot_venv_for_verification(tmp_path, monkeypatch):
     (tmp_path / ".execvenv").mkdir()
     seen = []
@@ -252,6 +311,36 @@ def test_local_backend_passing_suite(failing_project, monkeypatch):
 
     assert result.status == "ok"
     assert result.passed is True
+
+
+def test_local_backend_tolerates_non_locale_output(tmp_path, monkeypatch):
+    """Raw output bytes outside the host locale must not crash decoding.
+
+    Regression test for the Windows ``UnicodeDecodeError: 'charmap' codec
+    can't decode byte 0x81`` crash: repository test output is arbitrary
+    bytes and must be decoded lossily, never with strict locale decoding.
+    Byte 0x81 is invalid under both cp1252 and strict UTF-8, so this test
+    fails pre-fix on any host locale.
+    """
+    monkeypatch.setenv(UNSAFE_LOCAL_FLAG, "1")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_raw.py").write_text(
+        "def test_raw():\n"
+        "    import sys\n"
+        "    sys.stdout.buffer.write(b'\\x81not-locale\\n')\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    result = UnsafeLocalBackend().run(
+        ExecutionRequest(
+            snapshot=tmp_path,
+            test_command=["python", "-m", "pytest", "-q", "-s", "--tb=short"],
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.passed is True
+    assert "not-locale" in result.output
 
 
 def test_local_backend_runs_in_snapshot_dir(failing_project, monkeypatch):
@@ -541,6 +630,24 @@ def test_docker_success_never_force_removes(tmp_path, monkeypatch):
     DockerBackend().run(ExecutionRequest(snapshot=tmp_path))
 
     assert not [call for call in calls if call[1:2] == ["rm"]]
+
+
+def test_docker_run_labels_managed_containers(tmp_path, monkeypatch):
+    """Every container carries the management label for orphan cleanup."""
+    seen = []
+
+    def fake_run(args, **kwargs):
+        seen.append(args)
+        if args[:2] == ["docker", "version"]:
+            return _ok_result("27.0.0")
+        return _ok_result("1 passed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    DockerBackend().run(ExecutionRequest(snapshot=tmp_path))
+
+    run_args = seen[-1]
+    assert "--label" in run_args
+    assert run_args[run_args.index("--label") + 1] == "reporescue.managed=true"
 
 
 def test_docker_refuses_missing_snapshot(tmp_path, monkeypatch):

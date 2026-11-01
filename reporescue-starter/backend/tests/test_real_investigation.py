@@ -18,6 +18,7 @@ from app.execution import (
     UNSAFE_LOCAL_FLAG,
     ExecutionBackend,
     ExecutionResult,
+    UnsafeLocalBackend,
     select_backend,
 )
 from app.ingestion import clear_ingestions, ingest_repository
@@ -503,13 +504,21 @@ def test_api_route_registered_and_delegates(monkeypatch):
 
 
 def _git(args, cwd):
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
     assert result.returncode == 0, result.stderr
     return result
 
 
 def test_end_to_end_local_repo_with_flagged_backend(tmp_path, monkeypatch):
-    """Real clone at pinned SHA, real baseline, stub fix, real verification."""
+    """Real clone at pinned SHA, real baseline, stub fix, real verification.
+
+    The unsafe-local backend is pinned explicitly: ambient selection would
+    prefer Docker whenever a daemon is reachable, which changes the backend
+    under test and makes this test depend on host state.
+    """
     offline_project = {k: v for k, v in BUGGY_PROJECT.items() if k != "pyproject.toml"}
     repo = tmp_path / "repo"
     for rel, content in offline_project.items():
@@ -535,7 +544,9 @@ def test_end_to_end_local_repo_with_flagged_backend(tmp_path, monkeypatch):
     record = ingest_repository("https://github.com/acme/calc")
     assert record["profile"]["commit_sha"] == sha
 
-    result = pipeline.investigate_repository(record["ingestion_id"], diagnose=_fix_diagnose)
+    result = pipeline.investigate_repository(
+        record["ingestion_id"], backend=UnsafeLocalBackend(), diagnose=_fix_diagnose
+    )
 
     assert result["status"] == "complete"
     assert result["verdict"] == "TESTS_PASSED"

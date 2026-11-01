@@ -183,6 +183,8 @@ def _run_git(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
             ["git", *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             env=scrub_env_for_subprocess(),
