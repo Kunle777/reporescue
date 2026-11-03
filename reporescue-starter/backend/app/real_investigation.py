@@ -163,12 +163,23 @@ def _fresh_work_copy(pristine: Path, work: Path) -> Path:
     return work
 
 
+def _report_progress(on_progress: Any, stage: str, attempt: dict | None = None) -> None:
+    """Best-effort progress callback. Progress failures never break runs."""
+    if on_progress is None:
+        return
+    try:
+        on_progress(stage, attempt)
+    except Exception:
+        pass
+
+
 def investigate_repository(
     ingestion_id: str,
     *,
     backend: ExecutionBackend | None = None,
     diagnose=None,
     max_attempts: int = MAX_LIVE_ATTEMPTS,
+    on_progress=None,
 ) -> dict[str, Any]:
     """Run a real investigation for a stored ingestion record.
 
@@ -233,6 +244,7 @@ def investigate_repository(
                 _materialize(profile["url"], profile["commit_sha"], pristine)
             except IngestionError as exc:
                 return _error(str(exc), exc.reason, profile, execution=execution_info)
+            _report_progress(on_progress, "materialize")
             if requirements_pin_pytest(pristine, profile.get("dependency_files", [])):
                 # The repository declares its own pytest version: installing
                 # the plan's bare `pip install pytest` afterwards would
@@ -249,6 +261,7 @@ def investigate_repository(
             )
             baseline_result = backend.run(request)
             baseline = baseline_result.to_dict()
+            _report_progress(on_progress, "baseline")
             if baseline_result.status == "install_error":
                 return _error(
                     "Dependency installation failed inside the execution "
@@ -286,6 +299,7 @@ def investigate_repository(
                         baseline=baseline,
                     )
             if baseline_result.passed:
+                _report_progress(on_progress, "report")
                 return {
                     "status": "complete",
                     "repository": profile.get("name"),
@@ -365,7 +379,22 @@ def investigate_repository(
                 verification_result = backend.run(verify_request)
                 verification = verification_result.to_dict()
                 last_diagnosis, last_patch, last_verification = diagnosis, patchset, verification
+                _report_progress(
+                    on_progress,
+                    "repair",
+                    {
+                        "attempt_no": attempt,
+                        "diagnosis": diagnosis,
+                        "confidence": "confirmed" if verification.get("passed") else "hypothesis",
+                        "patch": patchset.to_dict(),
+                        "guard": {"validated": True, "message": f"Guard approved {len(applied)} edit(s)."}
+                        if verification.get("passed")
+                        else {"validated": False, "message": "Patch applied but verification did not pass."},
+                        "verification": verification,
+                    },
+                )
                 if verification_result.passed is True:
+                    _report_progress(on_progress, "report")
                     return build_real_report(
                         repository=profile.get("name"),
                         commit_sha=profile.get("commit_sha"),
@@ -403,6 +432,7 @@ def investigate_repository(
                     "invalid_output", profile,
                     execution=execution_info, baseline=baseline, attempts=attempts,
                 )
+            _report_progress(on_progress, "report")
             return build_real_report(
                 repository=profile.get("name"),
                 commit_sha=profile.get("commit_sha"),

@@ -1,23 +1,27 @@
 :root {
-  --navy: #171b35;
-  --indigo: #635bff;
-  --indigo-dark: #4f47e6;
-  --indigo-soft: #eef0ff;
-  --bg: #f8fafc;
-  --card: #ffffff;
-  --text: #171b35;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --success: #10b981;
-  --success-soft: #e6f9f1;
-  --warning: #f59e0b;
-  --warning-soft: #fef5e4;
-  --critical: #ef4444;
-  --critical-soft: #fdeeee;
-  --radius-sm: 10px;
-  --radius-md: 12px;
-  --radius-lg: 14px;
-  --shadow: 0 1px 2px rgb(23 27 53 / 0.06), 0 4px 16px rgb(23 27 53 / 0.06);
+  --navy: #e6edf3;
+  --indigo: #8b93ff;
+  --indigo-dark: #9aa4ff;
+  --indigo-soft: #1c2451;
+  --bg: #0d1117;
+  --card: #161b22;
+  --surface-2: #1c2128;
+  --surface-3: #21262d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --faint: #6e7681;
+  --border: #30363d;
+  --success: #3fb950;
+  --success-soft: #12261a;
+  --warning: #d29922;
+  --warning-soft: #2b2111;
+  --critical: #f85149;
+  --critical-soft: #2e1518;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --shadow: 0 1px 2px rgb(1 4 9 / 0.4), 0 4px 16px rgb(1 4 9 / 0.4);
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
 }
 
 * {
@@ -526,12 +530,12 @@ a {
 
 .banner-error {
   background: var(--critical-soft);
-  color: #7f1d1d;
+  color: #ffb4ab;
 }
 
 .banner-success {
   background: var(--success-soft);
-  color: #065f46;
+  color: #7ee2a8;
 }
 
 .list {
@@ -653,6 +657,10 @@ a {
 
 .rotate {
   transform: rotate(180deg);
+}
+
+.muted {
+  color: var(--muted);
 }
 
 .mono {
@@ -1304,6 +1312,12 @@ a {
   background: var(--indigo-soft);
 }
 
+.recent-button {
+  font: inherit;
+  color: inherit;
+  width: 100%;
+}
+
 .recent-repo {
   font-weight: 600;
   overflow: hidden;
@@ -1315,4 +1329,274 @@ a {
   font-size: 0.78rem;
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* ---------- Phase 5C additions: banners, tabs, chips ---------- */
+
+.pill.green {
+  color: var(--success);
+  background: var(--success-soft);
+  border: 1px solid #1f4d2e;
+}
+
+.pill.amber {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid #4d3a15;
+}
+
+.pill.red {
+  color: var(--critical);
+  background: var(--critical-soft);
+  border: 1px solid #5c2126;
+}
+
+.pill.blue {
+  color: var(--indigo-dark);
+  background: var(--indigo-soft);
+  border: 1px solid #2c3570;
+}
+
+.banner-warn {
+  background: var(--warning-soft);
+  border: 1px solid #4d3a15;
+}
+
+.banner-info {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.tab {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 9px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--indigo);
+}
+
+.tab:focus-visible,
+.mode-card:focus-visible,
+.fchip:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+.chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 8px;
+  margin: 1px 3px 1px 0;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+/* ---------- Phase 5C additions: mode cards, filters, findings ---------- */
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.mode-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  cursor: pointer;
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+
+.mode-card.selected {
+  border-color: var(--indigo);
+  background: var(--surface-2);
+}
+
+.mode-card strong {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 3px;
+}
+
+.mode-card span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.mode-card .def {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--indigo-dark);
+  letter-spacing: 0.04em;
+}
+
+.filter-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fchip {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.fchip.active {
+  color: var(--text);
+  border-color: var(--indigo);
+}
+
+.finding {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  margin-top: 10px;
+  background: var(--card);
+}
+
+.finding .frow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 5px;
+  flex-wrap: wrap;
+}
+
+.finding strong {
+  font-size: 0.85rem;
+}
+
+.finding p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.stepnum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 700;
+  margin-right: 8px;
+}
+
+/* ---------- Phase 5C additions: conversation ---------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md);
+  max-width: 88%;
+  margin-top: 10px;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--indigo-soft);
+  border: 1px solid #2c3570;
+}
+
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.msg .mrole {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--faint);
+}
+
+.msg p {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.msg.guidance {
+  border-style: dashed;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (max-width: 900px) {
+  .mode-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---------- Phase 5C: repository choice rows ---------- */
+
+.radio-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.radio-row input[type="radio"] {
+  margin-top: 4px;
+  accent-color: var(--indigo);
+}
+
+/* ---------- Phase 5C: idle timeline states ---------- */
+
+.node-idle {
+  background: var(--surface-2);
+  color: var(--faint);
+  border-color: var(--border);
+}
+
+.state-idle {
+  color: var(--faint);
 }

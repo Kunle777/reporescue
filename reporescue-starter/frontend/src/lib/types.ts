@@ -1,6 +1,6 @@
 /** Shared API shapes. Project mirrors the backend ProjectResponse contract. */
 
-export type View = "dashboard" | "projects" | "workbench" | "settings";
+export type View = "dashboard" | "projects" | "workbench" | "new-investigation" | "settings";
 
 export type Project = {
   id: string;
@@ -16,8 +16,10 @@ export type Project = {
 
 export type TestRun = {
   passed: boolean;
+  status?: string | null;
   exit_code: number | null;
   output: string;
+  output_truncated?: boolean;
   duration_ms: number;
 };
 
@@ -51,6 +53,79 @@ export type RepoProfile = {
   source_dirs: string[];
   structure_summary: string;
   warnings: string[];
+  capabilities?: CapabilityProfile;
+};
+
+export type LanguageInfo = {
+  files: number;
+  manifest?: string | null;
+};
+
+export type DependencyInfo = {
+  status: string;
+  files?: string[];
+  error?: string | null;
+};
+
+/** Mirrors backend capabilities: detected languages, deps, frameworks, gates. */
+export type CapabilityProfile = {
+  languages: Record<string, LanguageInfo>;
+  dependencies: Record<string, DependencyInfo>;
+  test_frameworks: string[];
+  static: { available: boolean };
+  runnable: { python: boolean; reason: string | null };
+  test_signals?: Record<string, { test_signals: string[]; has_test_script: boolean }>;
+};
+
+/** General-mode routing record attached to final reports. */
+export type RoutingInfo = {
+  requested_mode: string;
+  intent: string;
+  confidence: string;
+  reasons: string[];
+  mode: string | null;
+  plan_id: string | null;
+  conservative: boolean;
+  explanation: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string | null;
+  /** Backend assessment based on citations in persisted investigation evidence. */
+  grounding_status?: GroundingStatus;
+};
+
+export type GroundingStatus =
+  | "verified"
+  | "unverified"
+  | "citation_issue"
+  | "non_factual";
+
+export type UnsupportedReference = {
+  reference: string;
+  reason: string;
+};
+
+/** POST /api/investigations/{id}/messages response. */
+export type ConversationAnswer = {
+  session_id: string;
+  handled_as: "answer" | "guidance";
+  detection_reason: string;
+  user_message: ConversationMessage;
+  assistant_message: ConversationMessage;
+  grounding_status: GroundingStatus;
+  /** Compatibility field; true only for a response with verified evidence citations. */
+  citations_verified: boolean;
+  unsupported_references: UnsupportedReference[];
+};
+
+/** GET /api/investigations/{id}/messages response. */
+export type ConversationHistory = {
+  session_id: string | null;
+  messages: ConversationMessage[];
 };
 
 export type IngestResult = {
@@ -105,7 +180,7 @@ export type JobStatus =
   | "failed"
   | "cancelled";
 
-export type InvestigationMode = "debug" | "explain" | "health";
+export type InvestigationMode = "debug" | "explain" | "health" | "general";
 
 export type JobSummary = {
   job_id: string;
@@ -161,6 +236,7 @@ export type InvestigationDetail = {
     passed: boolean | null;
     exit_code: number | null;
     output: string | null;
+    output_truncated?: boolean;
     failures: ExecFailure[];
     duration_ms: number | null;
   }[];

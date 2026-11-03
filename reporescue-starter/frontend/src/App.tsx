@@ -2,16 +2,18 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, ShieldCheck } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
 import Login, { ResetPasswordForm } from "./components/Login";
+import DemoPanel from "./components/DemoPanel";
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import DashboardView from "./views/DashboardView";
 import ProjectsView from "./views/ProjectsView";
 import SettingsView from "./views/SettingsView";
 import WorkbenchView from "./views/WorkbenchView";
+import NewInvestigationView from "./views/NewInvestigationView";
 import { ApiError } from "./lib/api";
 import { getActiveJob } from "./lib/jobs";
 import { listProjects } from "./lib/projects";
-import type { Project, View } from "./lib/types";
+import type { IngestResult, Project, View } from "./lib/types";
 import { isTerminalStatus } from "./lib/types";
 
 export default function App() {
@@ -28,6 +30,7 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsError, setProjectsError] = useState("");
   const [restoredJobId, setRestoredJobId] = useState<string | null>(null);
+  const [pendingIngest, setPendingIngest] = useState<IngestResult | null>(null);
 
   const loadProjects = useCallback(async () => {
     setProjectsLoading(true);
@@ -149,7 +152,7 @@ export default function App() {
           >
             <ArrowLeft size={14} /> Back to sign in
           </button>
-          <WorkbenchView session={null} onUnauthorized={handleUnauthorized} />
+          <DemoPanel />
         </div>
       </div>
     );
@@ -163,13 +166,13 @@ export default function App() {
         <main className="content">
           {view === "dashboard" && (
             <DashboardView
-              userEmail={user?.email ?? null}
+              session={session}
               projects={projects}
-              loading={projectsLoading}
-              error={projectsError}
-              onRetry={() => void loadProjects()}
-              onGoProjects={() => setView("projects")}
-              onChanged={() => void loadProjects()}
+              onNavigate={setView}
+              onResume={(jobId) => {
+                setRestoredJobId(jobId);
+                setView("workbench");
+              }}
               onUnauthorized={handleUnauthorized}
             />
           )}
@@ -180,6 +183,10 @@ export default function App() {
               error={projectsError}
               onRetry={() => void loadProjects()}
               onChanged={() => void loadProjects()}
+              onStartInvestigation={(ingest) => {
+                setPendingIngest(ingest);
+                setView("new-investigation");
+              }}
               onUnauthorized={handleUnauthorized}
             />
           )}
@@ -189,6 +196,20 @@ export default function App() {
               onUnauthorized={handleUnauthorized}
               restoredJobId={restoredJobId}
               onJobAdopted={() => setRestoredJobId(null)}
+              onNewInvestigation={() => setView("new-investigation")}
+            />
+          )}
+          {view === "new-investigation" && (
+            <NewInvestigationView
+              projects={projects}
+              initialIngest={pendingIngest}
+              onIngestConsumed={() => setPendingIngest(null)}
+              onJobCreated={(jobId) => {
+                setRestoredJobId(jobId);
+                setView("workbench");
+              }}
+              onNavigate={setView}
+              onUnauthorized={handleUnauthorized}
             />
           )}
           {view === "settings" && (

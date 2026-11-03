@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -7,22 +8,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .ingestion import get_ingestion, ingest_repository
+from .jobs import router as jobs_router
+from .messages import router as messages_router
 from .orchestrator import investigate as run_investigation
+from .profile import router as profile_router
+from .projects import router as projects_router
 from .real_investigation import investigate_repository
+from . import job_runner
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    job_runner.startup_sweep()
+    yield
+
 
 app = FastAPI(
     title="RepoRescue API",
     description="Local-first, test-backed patch verification demo.",
-    version="0.3.0",
+    version="0.4.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+
+app.include_router(jobs_router)
+app.include_router(messages_router)
+app.include_router(projects_router)
+app.include_router(profile_router)
 
 
 class InvestigationRequest(BaseModel):

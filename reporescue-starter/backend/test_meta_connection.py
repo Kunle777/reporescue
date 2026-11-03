@@ -5,7 +5,7 @@ import urllib.error
 
 # TEMPORARY LOCAL TEST ONLY.
 # Paste your complete API key between the quotes.
-API_KEY = "LLM_1473779774620188_Cb-B-J8nDWzfEY9EOn8frcw5t3c"
+API_KEY = "NO API KEY SET"
 
 URL = "https://api.meta.ai/v1/chat/completions"
 

@@ -235,7 +235,11 @@ def test_ingest_with_real_local_clone_end_to_end(tmp_path, monkeypatch):
 
 
 def test_api_routes_registered():
-    paths = {(route.path, tuple(route.methods or ())) for route in main.app.routes}
+    paths = {
+        (route.path, tuple(route.methods or ()))
+        for route in main.app.routes
+        if hasattr(route, "path")  # skip lazily included routers
+    }
     assert ("/api/repos/ingest", ("POST",)) in paths
     assert ("/api/repos/{ingestion_id}", ("GET",)) in paths
     # Pre-existing contracts are untouched.

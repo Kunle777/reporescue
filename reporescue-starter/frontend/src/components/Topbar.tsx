@@ -5,6 +5,7 @@ const TITLES: Record<View, string> = {
   dashboard: "Dashboard",
   projects: "Projects",
   workbench: "Workbench",
+  "new-investigation": "New Investigation",
   settings: "Settings",
 };
 

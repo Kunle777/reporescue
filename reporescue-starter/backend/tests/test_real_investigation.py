@@ -482,7 +482,11 @@ def test_select_evidence_windows_around_traceback_line(tmp_path):
 
 
 def test_api_route_registered_and_delegates(monkeypatch):
-    paths = {(route.path, tuple(route.methods or ())) for route in main_module.app.routes}
+    paths = {
+        (route.path, tuple(route.methods or ()))
+        for route in main_module.app.routes
+        if hasattr(route, "path")  # skip lazily included routers
+    }
     assert ("/api/investigations", ("POST",)) in paths
 
     seen = {}
