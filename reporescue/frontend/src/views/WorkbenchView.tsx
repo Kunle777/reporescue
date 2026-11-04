@@ -1,15 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Activity, AlertTriangle, CircleHelp, Code2, FileCode2, FolderGit2,
+  Activity, AlertTriangle, CircleHelp, Code2, Download, FileCode2, FolderGit2,
   LoaderCircle, Play, ShieldCheck,
 } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { ApiError, apiJson } from "../lib/api";
 import { cancelJob, createJob, getJob, listJobs } from "../lib/jobs";
+import { downloadInvestigationPatch } from "../lib/patches";
 import type { IngestResult, InvestigationDetail, InvestigationMode, JobCard, Project } from "../lib/types";
 import { isTerminalStatus } from "../lib/types";
 
 const POLL_MS = 3000;
+const INSPECT_TIMEOUT_MS = 150_000;
+
+const INGEST_REASON_LABELS: Record<string, string> = {
+  invalid_url: "That repository URL is not supported. Use https://github.com/owner/repo.",
+  unsupported_host: "Only github.com repositories are supported.",
+  invalid_ref: "That branch, tag, or commit reference is invalid.",
+  not_found: "The repository was not found. Check the URL and that the repository is public.",
+  network_error: "The repository host could not be reached. Retry in a moment.",
+  clone_failed: "The repository could not be cloned.",
+  timeout: "Cloning the repository timed out. Retry, or try a smaller repository.",
+  repo_too_large: "The repository exceeds the supported size limit.",
+  workspace_error: "The backend could not prepare a workspace. Retry in a moment.",
+  config_error: "The backend is misconfigured. Contact support.",
+};
+
+function sanitizeBackendDetail(text: string): string {
+  return text
+    .replace(/[A-Za-z]:\\[^\s"']*/g, "[path]")
+    .replace(/\/(tmp|var|home|Users)[^\s"']*/g, "[path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
+function ingestFailureMessage(result: { reason?: string; message?: string }): string {
+  const label =
+    (result.reason && INGEST_REASON_LABELS[result.reason]) ||
+    "The API did not confirm repository inspection.";
+  const detail = result.message ? sanitizeBackendDetail(result.message) : "";
+  if (!detail || label.includes(detail)) return label;
+  return `${label} ${detail}`;
+}
 const TABS = ["Overview", "Findings", "Evidence", "Execution", "Changes", "Conversation"] as const;
 type Tab = (typeof TABS)[number];
 const MODES: { id: InvestigationMode; title: string; description: string; icon: typeof Activity }[] = [
@@ -69,6 +102,8 @@ export default function WorkbenchView({
   const [recentJobs, setRecentJobs] = useState<JobCard[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
   const [tab, setTab] = useState<Tab>("Overview");
   const [adopting, setAdopting] = useState(false);
   const submitting = useRef(false);
@@ -163,13 +198,24 @@ export default function WorkbenchView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: repoUrl.trim(), ref: repoRef.trim() || null }),
-      });
-      if (result.status !== "complete" || !result.ingestion_id) throw new Error("The API did not confirm repository inspection.");
+      }, { timeoutMs: INSPECT_TIMEOUT_MS });
+      if (result.status !== "complete" || !result.ingestion_id) throw new Error(ingestFailureMessage(result));
       setIngestResult(result);
       setTab("Overview");
     } catch (error) {
       setIngestError(authError(error, "Could not inspect the repository."));
     } finally { setIngestLoading(false); }
+  }
+
+  async function downloadPatch() {
+    if (!jobDetail || downloading) return;
+    setDownloading(true);
+    setDownloadError("");
+    try {
+      await downloadInvestigationPatch(jobDetail.investigation_id);
+    } catch (error) {
+      setDownloadError(authError(error, "Could not download the patch."));
+    } finally { setDownloading(false); }
   }
 
   async function startInvestigation() {
@@ -283,7 +329,7 @@ export default function WorkbenchView({
           {tab === "Findings" && <div className="result-list">{jobDetail.findings.length ? jobDetail.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className="result-item"><div className="result-item-heading"><span className={pillKind(finding.kind)}>{finding.kind}</span>{finding.category && <span className="muted">{finding.category}</span>}<span className="confidence">{finding.confidence} confidence</span></div><h4>{finding.title}</h4>{finding.detail && <p>{finding.detail}</p>}{finding.evidence != null && <details><summary>Inspect finding evidence</summary><DisplayValue value={finding.evidence} /></details>}</article>) : <EmptyResult title="No findings returned" text="Findings will appear here when they are present in the persisted investigation response." />}</div>}
           {tab === "Evidence" && <div className="result-list">{jobDetail.findings.some((finding) => finding.evidence != null) && jobDetail.findings.filter((finding) => finding.evidence != null).map((finding, index) => <article key={`evidence-${index}`} className="result-item"><h4>{finding.title}</h4><DisplayValue value={finding.evidence} /></article>)}{jobDetail.runs.map((run, index) => <article key={`run-evidence-${index}`} className="result-item"><h4>{run.kind} output</h4>{run.failures.map((failure, failureIndex) => <details key={failureIndex}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}{!run.failures.length && !run.output && <p className="muted">No execution evidence was recorded for this run.</p>}</article>)}{!jobDetail.findings.some((finding) => finding.evidence != null) && !jobDetail.runs.length && <EmptyResult title="No evidence recorded" text="Only repository and execution evidence returned by the backend is shown here." />}</div>}
           {tab === "Execution" && <div className="result-list">{jobDetail.runs.length ? jobDetail.runs.map((run, index) => <article key={`${run.kind}-${index}`} className="execution-card"><div className="result-item-heading"><h4>{run.kind}</h4><span className={pillKind(run.passed === true ? "passed" : run.passed === false ? "failed" : run.status || "not_run")}>{run.passed === true ? "tests passed" : run.passed === false ? "tests failed" : run.status || "not run"}</span></div><dl className="execution-meta"><div><dt>Provider</dt><dd>{run.backend || "Not reported"}</dd></div><div><dt>Isolation</dt><dd>{run.isolation || "Not reported"}</dd></div><div><dt>Exit code</dt><dd>{run.exit_code ?? "Not reported"}</dd></div><div><dt>Duration</dt><dd>{run.duration_ms == null ? "Not reported" : `${run.duration_ms} ms`}</dd></div></dl>{run.install_ok != null && <p className="hint">Dependency installation: {run.install_ok ? "completed" : "failed"}</p>}{run.install_log && <details><summary>Dependency installation output</summary><pre className="output">{run.install_log}</pre></details>}{run.output && <details open><summary>Captured execution output</summary><pre className="output">{run.output}</pre></details>}{run.truncated && <p className="truncation-note" role="status">The backend truncated this execution output.</p>}{run.failures.map((failure, i) => <details key={i}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}</article>) : <EmptyResult title="No execution run recorded" text="This investigation has no execution output. Static analysis does not imply that code was executed." />}</div>}
-          {tab === "Changes" && <div className="result-list">{jobDetail.patches.length ? jobDetail.patches.map((patch, index) => <article key={index} className="result-item"><div className="result-item-heading"><h4>Patch proposal {index + 1}</h4><span className={pillKind(patch.status)}>{patch.status}</span></div>{patch.reason && <p>{patch.reason}</p>}{patch.files.map((file, fileIndex) => <div key={fileIndex} className="diff-block"><div className="file-tab"><FileCode2 size={14} /><code>{file.file}</code></div><pre className="diff removed">{file.before || "No before content returned"}</pre><pre className="diff added">{file.after || "No after content returned"}</pre></div>)}<p className="hint">{jobDetail.verification_status === "passed" ? "The backend reports passing verification for this investigation." : `Verification is ${jobDetail.verification_status}; this patch has not been confirmed as a fix.`}</p></article>) : <EmptyResult title="No patch returned" text="The backend has not recorded a proposed change for this investigation." />}</div>}
+          {tab === "Changes" && <div className="result-list">{jobDetail.patches.some((patch) => patch.status === "applied") && <article className="result-item"><div className="result-item-heading"><h4>Guarded patch file</h4><span className={pillKind(jobDetail.verification_status === "passed" ? "verified" : "unverified")}>{jobDetail.verification_status === "passed" ? "verified" : "unverified"}</span></div><p className="hint">{jobDetail.verification_status === "passed" ? "Unified diff of the guarded patch for this investigation. Downloading does not apply it." : "Verification did not pass. This file is provided for inspection only; downloading does not apply it."}</p><button type="button" className="btn btn-secondary btn-sm" onClick={() => void downloadPatch()} disabled={downloading}>{downloading ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{downloading ? "Preparing\u2026" : "Download .patch"}</button>{downloadError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><p>{downloadError}</p></div></div>}</article>}{jobDetail.patches.length ? jobDetail.patches.map((patch, index) => <article key={index} className="result-item"><div className="result-item-heading"><h4>Patch proposal {index + 1}</h4><span className={pillKind(patch.status)}>{patch.status}</span></div>{patch.reason && <p>{patch.reason}</p>}{patch.files.map((file, fileIndex) => <div key={fileIndex} className="diff-block"><div className="file-tab"><FileCode2 size={14} /><code>{file.file}</code></div><pre className="diff removed">{file.before || "No before content returned"}</pre><pre className="diff added">{file.after || "No after content returned"}</pre></div>)}<p className="hint">{jobDetail.verification_status === "passed" ? "The backend reports passing verification for this investigation." : `Verification is ${jobDetail.verification_status}; this patch has not been confirmed as a fix.`}</p></article>) : <EmptyResult title="No patch returned" text="The backend has not recorded a proposed change for this investigation." />}</div>}
           {tab === "Conversation" && <div className="conversation-history"><p className="hint">Persisted conversation history from the investigation response. Sending follow-up messages is not available on the current backend contract.</p>{jobDetail.messages.length ? jobDetail.messages.map((message, index) => <article className={`message-entry ${message.role}`} key={`${index}-${message.role}`}><span>{message.role}</span><p>{message.content}</p></article>) : <EmptyResult title="No conversation messages" text="The investigation detail currently contains no persisted messages." />}</div>}
         </div>
       </section>}

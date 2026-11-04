@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { Session } from "@supabase/supabase-js";
+import { ApiError } from "../lib/api";
 import WorkbenchView from "./WorkbenchView";
 
 const mockJobs = vi.hoisted(() => ({
@@ -18,6 +19,9 @@ vi.mock("../lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/api")>();
   return { ...original, apiJson: mockApi.apiJson };
 });
+
+const mockPatches = vi.hoisted(() => ({ downloadInvestigationPatch: vi.fn() }));
+vi.mock("../lib/patches", () => mockPatches);
 
 const session = { access_token: "token" } as unknown as Session;
 
@@ -212,5 +216,135 @@ describe("WorkbenchView job restoration", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
     expect(screen.getByText("proposed")).toBeDefined();
     expect(screen.getByText(/this patch has not been confirmed as a fix/)).toBeDefined();
+  });
+});
+
+describe("WorkbenchView repository inspection", () => {
+  function inspect() {
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText("GitHub repository URL"), {
+      target: { value: "https://github.com/acme/calc" },
+    });
+    fireEvent.click(screen.getByText("Inspect repository"));
+  }
+
+  function completeIngest() {
+    return {
+      status: "complete",
+      ingestion_id: "ing1",
+      profile: {
+        name: "acme/calc", commit_sha: "b".repeat(40), structure_summary: "Python project.",
+        supported: true, primary_language: "python", test_framework: "pytest",
+        tests: { count: 0 },
+      },
+      warnings: [],
+    };
+  }
+
+  it("surfaces the backend failure reason instead of a generic error", async () => {
+    mockApi.apiJson.mockResolvedValueOnce({
+      status: "error", reason: "not_found", message: "Repository not found.",
+    });
+    inspect();
+    expect(await screen.findByText(/repository was not found/i)).toBeDefined();
+  });
+
+  it("falls back when the backend gives no reason", async () => {
+    mockApi.apiJson.mockResolvedValueOnce({ status: "error" });
+    inspect();
+    expect(
+      await screen.findByText("The API did not confirm repository inspection.")
+    ).toBeDefined();
+  });
+
+  it("redacts filesystem paths from backend detail", async () => {
+    mockApi.apiJson.mockResolvedValueOnce({
+      status: "error",
+      reason: "workspace_error",
+      message: "Failed at C:\\Temp\\x and /tmp/y.",
+    });
+    inspect();
+    const alert = await screen.findByText(/backend could not prepare a workspace/i);
+    expect(alert.textContent).not.toContain("C:\\Temp");
+    expect(alert.textContent).not.toContain("/tmp/y");
+  });
+
+  it("inspects with the extended timeout without duplicating the request", async () => {
+    mockApi.apiJson.mockResolvedValueOnce(completeIngest());
+    inspect();
+    await screen.findByText("What should RepoRescue do?");
+    expect(mockApi.apiJson).toHaveBeenCalledTimes(1);
+    expect(mockApi.apiJson).toHaveBeenCalledWith(
+      "/api/repos/ingest",
+      expect.objectContaining({ method: "POST" }),
+      { timeoutMs: 150000 }
+    );
+  });
+});
+
+describe("WorkbenchView patch download", () => {
+  function appliedDetail(overrides: Record<string, unknown> = {}) {
+    return detail({
+      status: "completed",
+      patches: [
+        {
+          status: "applied",
+          reason: "Fix.",
+          files: [{ file: "pkg/calc.py", before: "a", after: "b" }],
+        },
+      ],
+      verification_status: "passed",
+      ...overrides,
+    });
+  }
+
+  it("shows a verified download action for applied patches", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(appliedDetail());
+    mockPatches.downloadInvestigationPatch.mockResolvedValueOnce({ filename: "x.patch" });
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.getByText("Download .patch")).toBeDefined();
+    expect(screen.getByText("verified")).toBeDefined();
+    fireEvent.click(screen.getByText("Download .patch"));
+    expect(mockPatches.downloadInvestigationPatch).toHaveBeenCalledWith("i1");
+  });
+
+  it("warns on unverified patches and surfaces download errors", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(appliedDetail({ verification_status: "failed" }));
+    mockPatches.downloadInvestigationPatch.mockRejectedValueOnce(
+      new ApiError(404, "No downloadable patch is available for this investigation.")
+    );
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.getByText("unverified")).toBeDefined();
+    expect(screen.getByText(/provided for inspection only/)).toBeDefined();
+    fireEvent.click(screen.getByText("Download .patch"));
+    expect(
+      await screen.findByText(
+        "No downloadable patch is available for this investigation."
+      )
+    ).toBeDefined();
+  });
+
+  it("hides the download action without an applied patch", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(
+      detail({
+        status: "completed",
+        patches: [{ status: "proposed", reason: "Maybe.", files: [] }],
+        verification_status: "unverified",
+      })
+    );
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.queryByText("Download .patch")).toBeNull();
   });
 });

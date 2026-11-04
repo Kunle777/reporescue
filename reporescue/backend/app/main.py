@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy.orm import Session
@@ -31,7 +31,14 @@ from .profiles import (
 )
 from .projects import DuplicateProjectError
 from . import jobqueue as jobqueue_module
+from . import patch_download as patch_download_module
 from .jobqueue import InvalidMode
+from .patch_download import (
+    PatchDownloadError,
+    PatchNotFoundError,
+    PatchTooLargeError,
+    PatchUnrenderableError,
+)
 from .orchestrate import (
     ContextError,
     HandlerDeps,
@@ -434,6 +441,44 @@ def get_investigation_route(
     if investigation is None:
         raise HTTPException(status_code=404, detail="Not found.")
     return jobqueue_module.investigation_detail(db, investigation)
+
+
+@app.get("/api/investigations/{investigation_id}/patch")
+def download_investigation_patch(
+    investigation_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download an investigation's guarded patch as a unified diff.
+
+    Owner-scoped: unknown ids and other owners' rows are all 404.
+    """
+    investigation = jobqueue_module.get_investigation_for_owner(
+        db, investigation_id=investigation_id, owner_id=user.id
+    )
+    if investigation is None:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        content, filename, verified = patch_download_module.build_patch_download(
+            db, investigation
+        )
+    except PatchNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PatchUnrenderableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except PatchTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except PatchDownloadError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return Response(
+        content=content,
+        media_type="text/x-patch",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Patch-Verified": "true" if verified else "false",
+            "X-Patch-Commit": investigation.commit_sha,
+        },
+    )
 
 
 @app.post("/api/projects", status_code=201, response_model=ProjectResponse)

@@ -58,6 +58,8 @@ export type IngestResult = {
   ingestion_id: string;
   profile: RepoProfile;
   warnings: string[];
+  reason?: string;
+  message?: string;
 };
 
 export type ExecFailure = {
