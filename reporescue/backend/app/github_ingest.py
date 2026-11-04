@@ -254,6 +254,8 @@ def clone_and_pin(source: str, destination: Path, ref: str | None = None) -> str
     to exercise clone behavior without network access. The optional ``ref``
     (branch, tag, or commit) is fetched and checked out detached, then the
     exact HEAD SHA is recorded. Raises IngestionError on any failure.
+    File-writing commands run with ``core.longpaths=true`` so Windows
+    checkouts with deep generated paths (e.g. ``.expo`` caches) succeed.
     """
     cleaned_ref = validate_ref(ref)
     if destination.exists():
@@ -264,7 +266,8 @@ def clone_and_pin(source: str, destination: Path, ref: str | None = None) -> str
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     result = _run_git(
-        ["clone", "--depth", "1", "--no-tags", "--", source, str(destination)],
+        ["-c", "core.longpaths=true", "clone", "--depth", "1", "--no-tags",
+         "--", source, str(destination)],
         CLONE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
@@ -276,7 +279,8 @@ def clone_and_pin(source: str, destination: Path, ref: str | None = None) -> str
 
     if cleaned_ref:
         fetch = _run_git(
-            ["-C", str(destination), "fetch", "--depth", "1", "--no-tags",
+            ["-C", str(destination), "-c", "core.longpaths=true",
+             "fetch", "--depth", "1", "--no-tags",
              "origin", cleaned_ref],
             GIT_COMMAND_TIMEOUT_SECONDS,
         )
@@ -288,7 +292,8 @@ def clone_and_pin(source: str, destination: Path, ref: str | None = None) -> str
                 "invalid_ref",
             )
         checkout = _run_git(
-            ["-C", str(destination), "checkout", "--detach", "--quiet", "FETCH_HEAD"],
+            ["-C", str(destination), "-c", "core.longpaths=true",
+             "checkout", "--detach", "--quiet", "FETCH_HEAD"],
             GIT_COMMAND_TIMEOUT_SECONDS,
         )
         if checkout.returncode != 0:

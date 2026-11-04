@@ -67,6 +67,7 @@ export default function WorkbenchView({
   const [jobError, setJobError] = useState("");
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
   const [recentJobs, setRecentJobs] = useState<JobCard[]>([]);
+  const [recentLoading, setRecentLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   const [tab, setTab] = useState<Tab>("Overview");
   const [adopting, setAdopting] = useState(false);
@@ -87,12 +88,13 @@ export default function WorkbenchView({
 
   async function refreshRecent() {
     if (!session) return;
+    setRecentLoading(true);
     try {
       setRecentJobs(await listJobs(10));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       else setJobError(errorMessage(error, "Could not load recent investigations."));
-    }
+    } finally { setRecentLoading(false); }
   }
 
   useEffect(() => {
@@ -101,7 +103,8 @@ export default function WorkbenchView({
       if (!live) return;
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       else setJobError(errorMessage(error, "Could not load recent investigations."));
-    });
+    }).finally(() => { if (live) setRecentLoading(false); });
+    else setRecentLoading(false);
     return () => { live = false; };
   }, [session, onUnauthorized]);
 
@@ -175,10 +178,6 @@ export default function WorkbenchView({
       setJobError(`Job ${pendingJobId.slice(0, 8)} was accepted but its status has not loaded yet. Retry loading it before creating another investigation.`);
       return;
     }
-    if (mode === "general") {
-      setInvestError("General is shown as the default mode, but the current /api/jobs contract rejects it. Choose Debug, Explain, or Health until the backend exposes General on this route.");
-      return;
-    }
     submitting.current = true;
     setInvestLoading(true);
     setInvestError("");
@@ -231,13 +230,15 @@ export default function WorkbenchView({
   const summary = typeof report.summary === "string" ? report.summary : null;
 
   return (
-    <div className="workbench-page">
-      <div className="view-head workbench-heading">
-        <div><p className="eyebrow">REPOSITORY INVESTIGATION</p><h2>Workbench</h2><p>Inspect a repository, track the investigation, and review evidence and verification.</p></div>
+    <div className="workbench-page view-stack">
+      <header className="page-intro workbench-heading">
+        <div><p className="eyebrow">REPOSITORY ENGINEERING</p><h2>Workbench</h2><p>Set an investigation in motion, then inspect what the repository and execution can support.</p></div>
         {jobDetail && <span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>}
-      </div>
+      </header>
 
-      <section className="card investigation-setup" aria-labelledby="setup-title">
+      <div className="workbench-start-grid">
+      <div className="workbench-setup-main">
+      <section className="surface-section investigation-setup" aria-labelledby="setup-title">
         <div className="section-heading"><div><p className="eyebrow">NEW INVESTIGATION</p><h3 id="setup-title">Choose a repository and objective</h3></div><FolderGit2 size={20} /></div>
         <div className="setup-fields">
           <div className="field"><label className="label" htmlFor="registered-repository">Registered repository <span className="optional">(optional)</span></label>
@@ -263,17 +264,22 @@ export default function WorkbenchView({
         {investError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><strong>Investigation not started</strong><p>{investError}</p></div></div>}
       </section>}
 
+      </div>
+      <aside className="recent-section history-rail" aria-labelledby="history-title">
+        <div className="section-heading"><div><p className="eyebrow">SAVED WORK</p><h3 id="history-title">Recent investigations</h3></div></div>
+        {recentLoading ? <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Loading investigations…</div> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
+      </aside>
+      </div>
+
       {(jobError || adopting) && <div className={jobError ? "banner banner-error" : "banner banner-info"} role={jobError ? "alert" : "status"}>{jobError ? <AlertTriangle size={17} /> : <LoaderCircle size={17} className="spin" />}<div>{jobError || "Restoring your active investigation…"}</div>{jobError && <button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void openJob(jobId) : pendingJobId ? void openJob(pendingJobId) : restoredJobId ? void openJob(restoredJobId) : void refreshRecent()}>Retry</button>}</div>}
 
-      {recentJobs.length > 0 && <section className="recent-section"><div className="section-heading"><div><p className="eyebrow">PERSISTED JOBS</p><h3>Recent investigations</h3></div></div><div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status} · {job.progress_pct}%</span></button>)}</div></section>}
-
       {jobDetail && <section className="card workbench-results" aria-label="Investigation results">
-        <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode.toUpperCase()} INVESTIGATION</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
+        <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode === "general" && jobDetail.selected_mode ? `GENERAL \u2192 ${jobDetail.selected_mode.toUpperCase()} INVESTIGATION` : `${jobDetail.mode.toUpperCase()} INVESTIGATION`}</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
         {active && <div className="job-progress"><div className="progress-label"><span>{jobDetail.stage || jobDetail.status}</span><span>{jobDetail.progress_pct}% reported by API</span></div><progress value={jobDetail.progress_pct} max={100} aria-label={`Investigation progress ${jobDetail.progress_pct}%`} /></div>}
         {jobDetail.error && <div className="banner banner-error" role="status"><AlertTriangle size={17} /><div><strong>{jobDetail.error.reason}</strong><p>{jobDetail.error.message}</p></div></div>}
         <div className="workbench-tabs" role="tablist" aria-label="Investigation details" onKeyDown={(event) => { if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return; event.preventDefault(); const current = TABS.indexOf(tab); const next = event.key === "Home" ? 0 : event.key === "End" ? TABS.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length; setTab(TABS[next]); document.getElementById(`tab-${TABS[next].toLowerCase()}`)?.focus(); }}>{TABS.map((item) => <button key={item} id={`tab-${item.toLowerCase()}`} type="button" role="tab" tabIndex={tab === item ? 0 : -1} aria-selected={tab === item} aria-controls="workbench-panel" className={`workbench-tab${tab === item ? " active" : ""}`} onClick={() => setTab(item)}>{item}{item === "Findings" && <span>{jobDetail.findings.length}</span>}</button>)}</div>
         <div id="workbench-panel" role="tabpanel" aria-labelledby={`tab-${tab.toLowerCase()}`} className="workbench-panel">
-          {tab === "Overview" && <div className="overview-grid"><div className="overview-summary"><p className="eyebrow">INVESTIGATION SUMMARY</p>{summary ? <p>{summary}</p> : diagnosis ? <p>{diagnosis}</p> : <p className="muted">The backend has not returned a final assessment yet.</p>}{jobDetail.limitations.length > 0 && <ul className="limitation-list">{jobDetail.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}</div><div className="overview-facts"><div><span>Stage</span><strong>{jobDetail.stage || "Not reported"}</strong></div><div><span>Verification</span><strong className={pillKind(jobDetail.verification_status)}>{jobDetail.verification_status}</strong></div><div><span>Execution runs</span><strong>{jobDetail.runs.length}</strong></div><div><span>Proposed patches</span><strong>{jobDetail.patches.length}</strong></div></div>{diagnosis && summary && <div className="assessment-note"><ZapIcon /><div><strong>AI assessment</strong><p>{diagnosis}</p></div></div>}</div>}
+          {tab === "Overview" && <div className="overview-grid"><div className="overview-summary"><p className="eyebrow">INVESTIGATION SUMMARY</p>{summary ? <p>{summary}</p> : diagnosis ? <p>{diagnosis}</p> : <p className="muted">The backend has not returned a final assessment yet.</p>}{jobDetail.limitations.length > 0 && <ul className="limitation-list">{jobDetail.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}</div><div className="overview-facts"><div><span>Stage</span><strong>{jobDetail.stage || "Not reported"}</strong></div><div><span>Verification</span><strong className={pillKind(jobDetail.verification_status)}>{jobDetail.verification_status}</strong></div><div><span>Execution runs</span><strong>{jobDetail.runs.length}</strong></div><div><span>Proposed patches</span><strong>{jobDetail.patches.length}</strong></div></div>{jobDetail.routing && <div className="routing-note"><p className="eyebrow">GENERAL ROUTING</p><strong>Selected analysis: {jobDetail.routing.selected_mode}</strong><p>{jobDetail.routing.rationale}</p><span>Routing confidence: {jobDetail.routing.confidence}</span></div>}{diagnosis && summary && <div className="assessment-note"><ZapIcon /><div><strong>AI assessment</strong><p>{diagnosis}</p></div></div>}</div>}
           {tab === "Findings" && <div className="result-list">{jobDetail.findings.length ? jobDetail.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className="result-item"><div className="result-item-heading"><span className={pillKind(finding.kind)}>{finding.kind}</span>{finding.category && <span className="muted">{finding.category}</span>}<span className="confidence">{finding.confidence} confidence</span></div><h4>{finding.title}</h4>{finding.detail && <p>{finding.detail}</p>}{finding.evidence != null && <details><summary>Inspect finding evidence</summary><DisplayValue value={finding.evidence} /></details>}</article>) : <EmptyResult title="No findings returned" text="Findings will appear here when they are present in the persisted investigation response." />}</div>}
           {tab === "Evidence" && <div className="result-list">{jobDetail.findings.some((finding) => finding.evidence != null) && jobDetail.findings.filter((finding) => finding.evidence != null).map((finding, index) => <article key={`evidence-${index}`} className="result-item"><h4>{finding.title}</h4><DisplayValue value={finding.evidence} /></article>)}{jobDetail.runs.map((run, index) => <article key={`run-evidence-${index}`} className="result-item"><h4>{run.kind} output</h4>{run.failures.map((failure, failureIndex) => <details key={failureIndex}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}{!run.failures.length && !run.output && <p className="muted">No execution evidence was recorded for this run.</p>}</article>)}{!jobDetail.findings.some((finding) => finding.evidence != null) && !jobDetail.runs.length && <EmptyResult title="No evidence recorded" text="Only repository and execution evidence returned by the backend is shown here." />}</div>}
           {tab === "Execution" && <div className="result-list">{jobDetail.runs.length ? jobDetail.runs.map((run, index) => <article key={`${run.kind}-${index}`} className="execution-card"><div className="result-item-heading"><h4>{run.kind}</h4><span className={pillKind(run.passed === true ? "passed" : run.passed === false ? "failed" : run.status || "not_run")}>{run.passed === true ? "tests passed" : run.passed === false ? "tests failed" : run.status || "not run"}</span></div><dl className="execution-meta"><div><dt>Provider</dt><dd>{run.backend || "Not reported"}</dd></div><div><dt>Isolation</dt><dd>{run.isolation || "Not reported"}</dd></div><div><dt>Exit code</dt><dd>{run.exit_code ?? "Not reported"}</dd></div><div><dt>Duration</dt><dd>{run.duration_ms == null ? "Not reported" : `${run.duration_ms} ms`}</dd></div></dl>{run.install_ok != null && <p className="hint">Dependency installation: {run.install_ok ? "completed" : "failed"}</p>}{run.install_log && <details><summary>Dependency installation output</summary><pre className="output">{run.install_log}</pre></details>}{run.output && <details open><summary>Captured execution output</summary><pre className="output">{run.output}</pre></details>}{run.truncated && <p className="truncation-note" role="status">The backend truncated this execution output.</p>}{run.failures.map((failure, i) => <details key={i}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}</article>) : <EmptyResult title="No execution run recorded" text="This investigation has no execution output. Static analysis does not imply that code was executed." />}</div>}

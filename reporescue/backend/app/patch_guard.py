@@ -44,6 +44,7 @@ _PATCHSET_EXCLUDED_DIRS = frozenset(
         "venv",
         "env",
         "node_modules",
+        ".expo",
         "build",
         "dist",
         ".tox",

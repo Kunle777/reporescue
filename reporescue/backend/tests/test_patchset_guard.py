@@ -132,13 +132,14 @@ def test_rejects_non_python_files(workspace):
         validate_and_apply_patchset(workspace, patchset(FileEdit("README.md", "hello", "bye")))
 
 
-def test_rejects_excluded_directories(workspace):
-    target = workspace / ".git" / "hook.py"
+@pytest.mark.parametrize("junk", [".git/hook.py", "frontend/.expo/web/cache/icon.py"])
+def test_rejects_excluded_directories(workspace, junk):
+    target = workspace / junk
     target.parent.mkdir(parents=True)
     target.write_text("X = 1\n", encoding="utf-8")
 
     with pytest.raises(PatchRejected, match="excluded directory"):
-        validate_and_apply_patchset(workspace, patchset(FileEdit(".git/hook.py", "X = 1", "X = 2")))
+        validate_and_apply_patchset(workspace, patchset(FileEdit(junk, "X = 1", "X = 2")))
 
 
 def test_rejects_ambiguous_before_block(workspace):

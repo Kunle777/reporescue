@@ -111,6 +111,19 @@ def _derive_verification(mode: str, report: dict[str, Any]) -> str:
     return "failed"
 
 
+def _effective_mode(investigation: Investigation, report: dict[str, Any]) -> str:
+    """Strategy mode for findings and verification.
+
+    General delegates: prefer the routed selection (report first, row
+    fallback), otherwise the investigation's own mode.
+    """
+    routing = report.get("routing", {}) or {}
+    selected = routing.get("selected_mode") or investigation.selected_mode
+    if selected in ("debug", "explain", "health"):
+        return selected
+    return investigation.mode
+
+
 def _finalize_success(
     db: Session,
     investigation: Investigation,
@@ -121,14 +134,14 @@ def _finalize_success(
     investigation.limitations = list(report.get("limitations", []) or [])
     investigation.timings = report.get("timings")
     investigation.verification_status = _derive_verification(
-        investigation.mode, report
+        _effective_mode(investigation, report), report
     )
     partial = dict(investigation.partial or {})
     partial["summary"] = str(report.get("summary", ""))[:2000]
     investigation.partial = partial
     db.commit()
 
-    mode = investigation.mode
+    mode = _effective_mode(investigation, report)
     if mode == "debug":
         baseline = report.get("baseline", {}) or {}
         for failure in (baseline.get("failures", []) or [])[:MAX_FINDINGS_PER_RUN]:
@@ -236,9 +249,17 @@ def run_job(
     )
     try:
         recorder.check_cancelled()
-        if mode == "debug":
+        if mode in ("debug", "general"):
             recorder.stage_started("materialize")
         try:
+            def _ingest_phase(phase: str) -> None:
+                labels = {
+                    "clone": "cloning repository",
+                    "profile": "profiling repository",
+                    "context": "extracting context",
+                }
+                recorder.note_progress(f"materialize: {labels.get(phase, phase)}")
+
             ctx = build_context_for_worker(
                 repo_url=repo_url,
                 commit_sha=commit_sha,
@@ -247,6 +268,7 @@ def run_job(
                 mode=mode,
                 message=user_message,
                 max_attempts=max_attempts,
+                on_phase=_ingest_phase,
             )
         except ContextError as exc:
             with session_factory() as db:

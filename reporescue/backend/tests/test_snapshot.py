@@ -80,18 +80,20 @@ def test_vcs_and_environment_dirs_excluded(tmp_path):
     _write(src, "node_modules/dep/index.js", "dep")
     _write(src, "venv/bin/python", "binary")
     _write(src, "__pycache__/app.pyc", "bytecode")
+    _write(src, "frontend/.expo/web/cache/production/images/icon.png", "cached")
 
     staging_parent = create_staging_parent()
     try:
         manifest = build_snapshot(src, staging_parent / "tree")
         assert manifest.file_count == 1
-        assert manifest.excluded.get("excluded_dir", 0) >= 4
+        assert manifest.excluded.get("excluded_dir", 0) >= 5
         staged = staging_parent / "tree"
         assert not (staged / ".git").exists()
         assert not (staged / ".execvenv").exists()
         assert not (staged / "node_modules").exists()
         assert not (staged / "venv").exists()
         assert not (staged / "__pycache__").exists()
+        assert not (staged / "frontend" / ".expo").exists()
     finally:
         remove_staging(staging_parent)
 

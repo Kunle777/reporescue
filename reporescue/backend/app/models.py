@@ -134,7 +134,7 @@ class Investigation(Base):
             name="ck_investigations_status",
         ),
         CheckConstraint(
-            "mode IN ('debug', 'explain', 'health')",
+            "mode IN ('debug', 'explain', 'health', 'general')",
             name="ck_investigations_mode",
         ),
         CheckConstraint(
@@ -159,6 +159,8 @@ class Investigation(Base):
     commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     ref: Mapped[str | None] = mapped_column(String(200))
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    selected_mode: Mapped[str | None] = mapped_column(String(20))
+    routing: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     user_message: Mapped[str | None] = mapped_column(String(2000))
     max_attempts: Mapped[int] = mapped_column(nullable=False, default=3)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
@@ -439,4 +441,32 @@ class Job(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RepoSnapshot(Base):
+    """One durable inspection snapshot owned by a user.
+
+    Created alongside the in-memory ingestion record so job creation
+    survives API restarts and browser refreshes. The worker still
+    re-ingests from the pinned URL/SHA; this row only carries the
+    validated coordinates, profile, and context the UI already saw.
+    """
+
+    __tablename__ = "repo_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    repo_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    repo_name: Mapped[str] = mapped_column(String(400), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    ref: Mapped[str | None] = mapped_column(String(200))
+    profile: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    warnings: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    timings: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

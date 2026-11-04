@@ -70,7 +70,7 @@ export default function AddRepositoryForm({
 
   return (
     <div>
-      <form onSubmit={(event) => void submit(event)} className="form-stack">
+      <form onSubmit={(event) => void submit(event)} className="form-stack add-repository-form">
         <div className="field">
           <label className="label" htmlFor="repo-url">
             Public GitHub URL
@@ -110,7 +110,7 @@ export default function AddRepositoryForm({
         </div>
       </form>
       {error && (
-        <div className="banner banner-error">
+        <div className="banner banner-error" role="alert">
           <AlertTriangle size={17} />
           <div>
             <strong>Could not add repository</strong>
@@ -119,7 +119,7 @@ export default function AddRepositoryForm({
         </div>
       )}
       {success && (
-        <div className="banner banner-success">
+        <div className="banner banner-success" role="status">
           <CheckCircle2 size={17} />
           <div>
             <strong>Repository added</strong>

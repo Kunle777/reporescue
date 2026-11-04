@@ -105,10 +105,10 @@ export type JobStatus =
   | "failed"
   | "cancelled";
 
-/** General is part of the approved UI; the canonical POST /api/jobs schema currently rejects it. */
+/** Investigation modes offered by the UI. */
 export type InvestigationMode = "general" | "debug" | "explain" | "health";
-/** Modes accepted by the current FastAPI POST /api/jobs schema. */
-export type ApiInvestigationMode = Exclude<InvestigationMode, "general">;
+/** Modes accepted by the FastAPI POST /api/jobs schema (General routes server-side). */
+export type ApiInvestigationMode = InvestigationMode;
 
 export type JobSummary = {
   job_id: string;
@@ -134,6 +134,13 @@ export type InvestigationDetail = {
   commit_sha: string;
   ref: string | null;
   mode: ApiInvestigationMode;
+  selected_mode: InvestigationMode | null;
+  routing: {
+    selected_mode: string;
+    rationale: string;
+    confidence: string;
+    signals: Record<string, string[]>;
+  } | null;
   user_message: string | null;
   status: JobStatus;
   stage: string | null;

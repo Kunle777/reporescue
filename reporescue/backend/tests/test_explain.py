@@ -225,7 +225,7 @@ def test_mode_defaults_to_debug_for_existing_clients():
 
 def test_route_rejects_unknown_mode():
     with pytest.raises(ValidationError):
-        main_module.RealInvestigationRequest(ingestion_id="abc", mode="general")
+        main_module.RealInvestigationRequest(ingestion_id="abc", mode="bogus")
 
 
 def test_route_dispatches_explain_through_shared_entry(monkeypatch, tmp_path):

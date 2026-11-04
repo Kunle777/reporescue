@@ -29,6 +29,8 @@ function detail(overrides: Record<string, unknown> = {}) {
     commit_sha: "b".repeat(40),
     ref: null,
     mode: "debug",
+    selected_mode: null,
+    routing: null,
     user_message: null,
     status: "running",
     stage: "baseline",
@@ -159,16 +161,26 @@ describe("WorkbenchView job restoration", () => {
     expect(mockJobs.cancelJob).toHaveBeenCalledWith("j1");
   });
 
-  it("keeps General selected by default and reports the canonical API limitation without submitting", async () => {
+  it("submits General investigations for server-side routing", async () => {
     render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
     mockApi.apiJson.mockResolvedValueOnce({ status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] });
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j7", investigation_id: "i7", status: "queued" });
+    mockJobs.getJob.mockResolvedValueOnce(detail({ mode: "general", selected_mode: "debug", job: { job_id: "j7", investigation_id: "i7", status: "queued", attempts: 0, max_attempts: 3, error: null, created_at: null, updated_at: null }, status: "queued", progress_pct: 0 }));
     fireEvent.change(screen.getByLabelText("GitHub repository URL"), { target: { value: "https://github.com/acme/calc" } });
     fireEvent.click(screen.getByText("Inspect repository"));
     expect(await screen.findByText("What should RepoRescue do?")).toBeDefined();
     expect(screen.getByRole("radio", { name: /General/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), {
+      target: { value: "fix the failing tests" },
+    });
     fireEvent.click(screen.getByText("Start investigation"));
-    expect(await screen.findByText(/current \/api\/jobs contract rejects it/)).toBeDefined();
-    expect(mockJobs.createJob).not.toHaveBeenCalled();
+    expect(mockJobs.createJob).toHaveBeenCalledTimes(1);
+    expect(mockJobs.createJob).toHaveBeenCalledWith({
+      ingestion_id: "ing1",
+      mode: "general",
+      message: "fix the failing tests",
+    });
+    expect(await screen.findByText(/GENERAL → DEBUG INVESTIGATION/)).toBeDefined();
   });
 
   it("renders persisted conversation history read-only", async () => {

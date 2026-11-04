@@ -105,16 +105,16 @@ export default function App() {
   if (recoveryPending && session) {
     return (
       <div className="auth-screen">
-        <div className="auth-card">
-          <div className="auth-brand">
-            <span className="brand-mark">
-              <ShieldCheck size={22} />
-            </span>
-            <strong>Set a new password</strong>
-            <p>You arrived from a password-reset link.</p>
-          </div>
-          <ResetPasswordForm />
-          <p className="company-attribution">Made by K. T Labs</p>
+        <div className="auth-layout">
+          <AuthAside />
+          <section className="auth-card">
+            <div className="auth-form-heading">
+              <h1>Set a new password</h1>
+              <p>You arrived from a password-reset link.</p>
+            </div>
+            <ResetPasswordForm />
+            <p className="company-attribution">Made by K. T Labs</p>
+          </section>
         </div>
       </div>
     );
@@ -123,16 +123,12 @@ export default function App() {
   if (!session) {
     return (
       <div className="auth-screen">
-        <div className="auth-card">
-          <div className="auth-brand">
-            <span className="brand-mark">
-              <ShieldCheck size={22} />
-            </span>
-            <strong>RepoRescue</strong>
-            <p>Sign in to manage repositories and run investigations.</p>
-          </div>
-          <Login />
-          <p className="company-attribution">Made by K. T Labs</p>
+        <div className="auth-layout">
+          <AuthAside />
+          <section className="auth-card">
+            <Login />
+            <p className="company-attribution">Made by K. T Labs</p>
+          </section>
         </div>
       </div>
     );
@@ -152,6 +148,11 @@ export default function App() {
               error={projectsError}
               onRetry={() => void loadProjects()}
               onGoProjects={() => setView("projects")}
+              onGoWorkbench={() => setView("workbench")}
+              onOpenInvestigation={(id) => {
+                setRestoredJobId(id);
+                setView("workbench");
+              }}
               onChanged={() => void loadProjects()}
               onUnauthorized={handleUnauthorized}
             />
@@ -185,5 +186,26 @@ export default function App() {
         <footer className="app-footer">Made by K. T Labs</footer>
       </div>
     </div>
+  );
+}
+
+function AuthAside() {
+  return (
+    <aside className="auth-aside">
+      <div className="auth-aside-brand">
+        <span className="brand-mark"><ShieldCheck size={20} /></span>
+        <span>RepoRescue</span>
+      </div>
+      <div className="auth-aside-copy">
+        <p className="eyebrow">REPOSITORY ENGINEERING</p>
+        <h2>Investigate with evidence. Verify with execution.</h2>
+        <p>Understand a codebase, trace a problem, and review what the tests actually prove.</p>
+      </div>
+      <div className="auth-principles" aria-label="RepoRescue principles">
+        <div><span>01</span><strong>Inspect the pinned revision</strong></div>
+        <div><span>02</span><strong>Separate findings from hypotheses</strong></div>
+        <div><span>03</span><strong>Trust execution evidence</strong></div>
+      </div>
+    </aside>
   );
 }

@@ -72,7 +72,7 @@ export default function ProjectList({
   }
 
   return (
-    <div>
+    <div className="project-list-wrap">
       {error && (
         <div className="banner banner-error">
           <AlertTriangle size={17} />
@@ -84,9 +84,9 @@ export default function ProjectList({
       )}
       <ul className="list">
         {projects.map((project) => (
-          <li key={project.id} className="list-row">
-            <span className="row-icon">
-              <FolderGit2 size={17} />
+          <li key={project.id} className="list-row repository-row">
+            <span className="row-icon repo-logo">
+              <FolderGit2 size={18} />
             </span>
             <div className="row-main">
               {editingId === project.id ? (
@@ -120,13 +120,14 @@ export default function ProjectList({
                 </span>
               ) : (
                 <>
-                  <strong>{project.display_name}</strong>
-                  <small>
-                    {project.github_owner}/{project.repository_name}
-                    {project.default_branch ? ` · ${project.default_branch}` : ""}
-                    {" · added "}
-                    {new Date(project.created_at).toLocaleDateString()}
-                  </small>
+                  <div className="repo-primary">
+                    <strong>{project.display_name}</strong>
+                    <span className="repo-owner">{project.github_owner}/{project.repository_name}</span>
+                  </div>
+                  <div className="repo-meta">
+                    {project.default_branch && <span>Default branch <code>{project.default_branch}</code></span>}
+                    <span>Added {new Date(project.created_at).toLocaleDateString()}</span>
+                  </div>
                 </>
               )}
             </div>

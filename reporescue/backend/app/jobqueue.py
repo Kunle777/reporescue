@@ -33,6 +33,7 @@ from .models import (
     Job,
     Patch,
     PatchFile,
+    RepoSnapshot,
     transition_allowed,
 )
 
@@ -92,7 +93,7 @@ def create_investigation(
     The initial user message is stored both as the immutable request
     echo (``user_message``) and as the first conversation row.
     """
-    if mode not in ("debug", "explain", "health"):
+    if mode not in ("debug", "explain", "health", "general"):
         raise InvalidMode(f"Unknown investigation mode {mode!r}.")
     message = (user_message or "").strip() or None
     if message is not None:
@@ -354,6 +355,73 @@ def get_job_for_owner(db: Session, *, job_id: UUID, owner_id: UUID) -> Job | Non
     ).first()
 
 
+def save_snapshot_record(
+    db: Session, *, owner_id: UUID, record: dict[str, Any]
+) -> RepoSnapshot | None:
+    """Persist an ingestion record as a durable snapshot row.
+
+    Uses the record's own ingestion id so job creation resolves the
+    same identifier from memory or the database. Returns None when
+    the record is incomplete. An existing row id is left untouched
+    (ids are random per ingestion; a collision keeps the first row).
+    """
+    ingestion_id = record.get("ingestion_id")
+    profile = record.get("profile")
+    context = record.get("context")
+    if (
+        not isinstance(ingestion_id, str)
+        or not ingestion_id.strip()
+        or not isinstance(profile, dict)
+        or not isinstance(context, dict)
+    ):
+        return None
+    existing = db.get(RepoSnapshot, ingestion_id.strip())
+    if existing is not None:
+        return existing
+    row = RepoSnapshot(
+        id=ingestion_id.strip(),
+        owner_id=owner_id,
+        repo_url=str(profile.get("url", "")),
+        repo_name=str(profile.get("name", "")),
+        commit_sha=str(profile.get("commit_sha", "")),
+        ref=profile.get("ref"),
+        profile=profile,
+        context=context,
+        warnings=list(record.get("warnings", []) or []),
+        timings=record.get("timings"),
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def get_snapshot_for_owner(
+    db: Session, *, snapshot_id: str, owner_id: UUID
+) -> RepoSnapshot | None:
+    """Return the owner's snapshot row, or None."""
+    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+        return None
+    return db.scalars(
+        select(RepoSnapshot).where(
+            RepoSnapshot.id == snapshot_id.strip(),
+            RepoSnapshot.owner_id == owner_id,
+        )
+    ).first()
+
+
+def snapshot_to_record(row: RepoSnapshot) -> dict[str, Any]:
+    """Rebuild an ingestion-shaped record from a durable snapshot row."""
+    return {
+        "status": "complete",
+        "ingestion_id": row.id,
+        "profile": dict(row.profile or {}),
+        "context": dict(row.context or {}),
+        "warnings": list(row.warnings or []),
+        "timings": dict(row.timings or {}),
+        "owner_id": str(row.owner_id),
+    }
+
+
 def get_investigation_for_owner(
     db: Session, *, investigation_id: UUID, owner_id: UUID
 ) -> Investigation | None:
@@ -521,6 +589,8 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         "commit_sha": investigation.commit_sha,
         "ref": investigation.ref,
         "mode": investigation.mode,
+        "selected_mode": investigation.selected_mode,
+        "routing": investigation.routing,
         "user_message": investigation.user_message,
         "status": investigation.status,
         "stage": investigation.stage,

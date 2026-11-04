@@ -10,7 +10,7 @@ import type { View } from "../lib/types";
 
 const ITEMS: { id: View; label: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "projects", label: "Projects", icon: FolderGit2 },
+  { id: "projects", label: "Repositories", icon: FolderGit2 },
   { id: "workbench", label: "Workbench", icon: FlaskConical },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
@@ -28,8 +28,12 @@ export default function Sidebar({
         <span className="brand-mark">
           <ShieldCheck size={20} />
         </span>
-        <span className="brand-name">RepoRescue</span>
+        <span className="brand-lockup">
+          <span className="brand-name">RepoRescue</span>
+          <span className="brand-caption">Repository engineering</span>
+        </span>
       </div>
+      <span className="nav-caption">WORKSPACE</span>
       <nav className="nav" aria-label="Primary">
         {ITEMS.map((item) => (
           <button

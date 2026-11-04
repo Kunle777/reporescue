@@ -270,3 +270,9 @@ def test_route_auth_wiring():
             dependency.call is get_current_user
             for dependency in dependant.dependencies
         ), key
+
+
+def test_health_endpoint_reports_liveness_without_demo_mode():
+    from app.main import health
+
+    assert health() == {"status": "ok", "service": "RepoRescue API"}

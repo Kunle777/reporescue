@@ -170,7 +170,7 @@ def test_delete_project(db):
     assert exc_info.value.status_code == 404
 
 
-def test_ingest_tags_owner_and_enforces_it(local_project):
+def test_ingest_tags_owner_and_enforces_it(db, local_project):
     owner = _user()
     stranger = _user()
     record = main_module.ingest_repo(
@@ -178,15 +178,15 @@ def test_ingest_tags_owner_and_enforces_it(local_project):
     )
     assert record["status"] == "complete"
     assert (
-        main_module.get_repo(record["ingestion_id"], owner)["ingestion_id"]
+        main_module.get_repo(record["ingestion_id"], owner, db)["ingestion_id"]
         == record["ingestion_id"]
     )
     with pytest.raises(HTTPException) as exc_info:
-        main_module.get_repo(record["ingestion_id"], stranger)
+        main_module.get_repo(record["ingestion_id"], stranger, db)
     assert exc_info.value.status_code == 404
 
 
-def test_investigation_skips_foreign_ingestion(monkeypatch, local_project):
+def test_investigation_skips_foreign_ingestion(db, monkeypatch, local_project):
     owner = _user()
     stranger = _user()
     record = main_module.ingest_repo(
@@ -202,19 +202,19 @@ def test_investigation_skips_foreign_ingestion(monkeypatch, local_project):
             main_module.RealInvestigationRequest(
                 ingestion_id=record["ingestion_id"]
             ),
-            stranger,
+            stranger, db,
         )
     assert exc_info.value.status_code == 404
 
 
-def test_untagged_record_inaccessible_through_routes(monkeypatch, local_project):
+def test_untagged_record_inaccessible_through_routes(db, monkeypatch, local_project):
     """Legacy records without an owner tag are denied on protected routes."""
     record = ingest_repository("https://github.com/acme/local")
     assert record["status"] == "complete"
     user = _user()
 
     with pytest.raises(HTTPException) as exc_info:
-        main_module.get_repo(record["ingestion_id"], user)
+        main_module.get_repo(record["ingestion_id"], user, db)
     assert exc_info.value.status_code == 404
 
     def must_not_run(*args, **kwargs):
@@ -226,6 +226,6 @@ def test_untagged_record_inaccessible_through_routes(monkeypatch, local_project)
             main_module.RealInvestigationRequest(
                 ingestion_id=record["ingestion_id"]
             ),
-            user,
+            user, db,
         )
     assert exc_info.value.status_code == 404

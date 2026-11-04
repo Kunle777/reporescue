@@ -245,6 +245,12 @@ class NullRecorder:
     def record_partial(self, data: dict[str, Any]) -> None:
         _ = data
 
+    def record_routing(self, selected_mode: str, routing: dict[str, Any]) -> None:
+        _ = (selected_mode, routing)
+
+    def note_progress(self, detail: str) -> None:
+        _ = detail
+
     def check_cancelled(self) -> None:
         return None
 
@@ -267,6 +273,7 @@ HANDLER_PATHS: dict[str, tuple[str, str]] = {
     "explain_context": (".explain", "stage_explain_context"),
     "explain_summarize": (".explain", "stage_explain_summarize"),
     "health_checks": (".health", "stage_health_checks"),
+    "general_route": (".general", "stage_general_route"),
     "health_summarize": (".health", "stage_health_summarize"),
 }
 
@@ -333,6 +340,12 @@ PLANS: dict[str, InvestigationPlan] = {
             ("summarize", "health_summarize"),
         ),
     ),
+    "general": _fine_plan(
+        "general", "general",
+        (
+            ("route", "general_route"),
+        ),
+    ),
 }
 
 
@@ -340,11 +353,11 @@ def plan_for_mode(mode: str, capabilities: dict[str, Any]) -> InvestigationPlan:
     """Resolve the executable plan for ``mode`` given ``capabilities``.
 
     Debug resolves to ``debug`` vs ``debug-static`` by the same rule the
-    pipeline gate uses (supported test framework present). General is
-    specified but not exposed until Task 4.
+    pipeline gate uses (supported test framework present). General
+    resolves to the routing plan, which delegates to a strategy plan.
     """
     if mode == "general":
-        raise UnknownPlanError("General plans land in Task 4; not exposed yet.")
+        return PLANS["general"]
     if mode not in ("debug", "explain", "health"):
         raise UnknownPlanError(f"No plan for mode {mode!r}.")
     runnable = capabilities.get("runnable", {}) or {}
@@ -456,6 +469,7 @@ def build_context_for_worker(
     max_attempts: int = 3,
     plan_id: str | None = None,
     ingest_fn: Callable[..., dict[str, Any]] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> InvestigationContext:
     """Rebuild context for a background job without the global store.
 
@@ -470,7 +484,10 @@ def build_context_for_worker(
     if not _SHA_RE.match(commit_sha or ""):
         raise ContextError("bad_sha", "Persisted commit SHA is invalid.")
     ingest = ingest_fn or ingest_repository
-    record = ingest(repo_url, ref=commit_sha)
+    if on_phase is not None and ingest is ingest_repository:
+        record = ingest(repo_url, ref=commit_sha, on_phase=on_phase)
+    else:
+        record = ingest(repo_url, ref=commit_sha)
     if not isinstance(record, dict) or record.get("status") != "complete":
         raise ContextError(
             str(record.get("reason", "ingest_failed")) if isinstance(record, dict) else "ingest_failed",

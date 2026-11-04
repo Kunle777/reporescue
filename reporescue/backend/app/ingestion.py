@@ -17,6 +17,7 @@ repository is executed here; isolated execution belongs to a later phase.
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from .github_ingest import (
@@ -35,8 +36,16 @@ _store: dict[str, dict[str, Any]] = {}
 _store_lock = threading.Lock()
 
 
-def ingest_repository(url: str, ref: str | None = None) -> dict[str, Any]:
+def ingest_repository(
+    url: str,
+    ref: str | None = None,
+    on_phase: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Ingest one public GitHub repository and return its record.
+
+    ``on_phase`` receives "clone", "profile", then "context" as phases
+    start, for liveness reporting by long-running callers. Callback
+    failures never fail ingestion.
 
     Returns ``{"status": "complete", ...}`` with the profile and context, or
     ``{"status": "error", "reason": ..., "message": ...}`` following the
@@ -58,6 +67,7 @@ def ingest_repository(url: str, ref: str | None = None) -> dict[str, Any]:
             destination = workspace / "repo"
             try:
                 step_start = time.perf_counter()
+                _emit_phase(on_phase, "clone")
                 sha = clone_and_pin(normalized.url, destination, cleaned_ref)
                 timings["clone_ms"] = max(0, round((time.perf_counter() - step_start) * 1000))
             except IngestionError as exc:
@@ -69,6 +79,7 @@ def ingest_repository(url: str, ref: str | None = None) -> dict[str, Any]:
                     "name": name,
                 }
             step_start = time.perf_counter()
+            _emit_phase(on_phase, "profile")
             profile = build_profile(
                 destination,
                 url=normalized.url,
@@ -78,6 +89,7 @@ def ingest_repository(url: str, ref: str | None = None) -> dict[str, Any]:
             )
             timings["profile_ms"] = max(0, round((time.perf_counter() - step_start) * 1000))
             step_start = time.perf_counter()
+            _emit_phase(on_phase, "context")
             inventory = inventory_repository(destination)
             timings["inventory_ms"] = max(0, round((time.perf_counter() - step_start) * 1000))
             step_start = time.perf_counter()
@@ -106,6 +118,15 @@ def ingest_repository(url: str, ref: str | None = None) -> dict[str, Any]:
             _store.pop(next(iter(_store)))
         _store[record["ingestion_id"]] = record
     return record
+
+
+def _emit_phase(on_phase: Callable[[str], None] | None, phase: str) -> None:
+    if on_phase is None:
+        return
+    try:
+        on_phase(phase)
+    except Exception:
+        pass
 
 
 def get_ingestion(ingestion_id: str) -> dict[str, Any]:

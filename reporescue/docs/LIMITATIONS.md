@@ -117,7 +117,7 @@ original entry is preserved with its actual status.
 - **Acceptance test:** `tests/test_verdict.py`,
   `tests/test_execution_lifecycle.py` (outcome labels).
 
-### L8 — Enqueue requires a live ingestion record
+### L8 — Enqueue required a live ingestion record (resolved in MVP stabilisation)
 - **Subsystem:** ingestion store, `POST /api/jobs`
 - **Impact:** A server restart (or FIFO eviction) between Inspect and Start
   forces re-inspection; enqueue fails with 404/422 instead of queuing.
@@ -125,10 +125,14 @@ original entry is preserved with its actual status.
   depends on API-process memory.
 - **Evidence:** `create_job_route` owner/record checks; worker re-ingest
   from `repo_url`/`commit_sha`.
-- **Resolution:** Accepted; the enqueue window is seconds, and the failure
-  message tells the user to re-inspect.
+- **Resolution:** Resolved in MVP stabilisation. The ingest route persists
+  a `repo_snapshots` row (migration 0006) and job creation resolves
+  memory-then-database with owner checks, so enqueue survives API
+  restarts and refreshes; ad-hoc URLs need no project record.
 - **Acceptance test:** `tests/test_jobs.py`
-  (`test_create_job_route_missing_ingestion_is_404`).
+  (`test_create_job_route_survives_restart_via_snapshot`,
+  `test_snapshot_rows_are_owner_isolated`,
+  `test_create_job_route_missing_ingestion_is_404`).
 
 ### L9 — Cancellation takes effect at stage boundaries
 - **Subsystem:** worker, execution backends
@@ -201,3 +205,19 @@ original entry is preserved with its actual status.
   policy allows the drivers, or install a system libpq for psycopg's
   python implementation.
 - **Acceptance test:** `tests/test_db.py` (green when drivers load).
+
+### L14 — Windows long-path checkout failures (resolved in MVP stabilisation)
+- **Subsystem:** `backend/app/github_ingest.py`, `backend/app/repo_context.py`
+- **Impact:** Git could not check out deeply nested generated paths
+  (e.g. `frontend/.expo/web/cache/...` in Kunle777/change-app),
+  failing ingestion with `clone_failed` on Windows.
+- **Evidence:** reported checkout failure on the nested Expo cache path.
+- **Resolution:** Resolved. File-writing git commands run with
+  `core.longpaths=true`, and `.expo` plus other tool-generated caches
+  (`.output`, `.turbo`, `.parcel-cache`, `.vercel`, `.nyc_output`)
+  join the shared `EXCLUDED_DIRS`, keeping them out of inventory,
+  snapshots, and patches without touching real sources or manifests.
+- **Acceptance test:** `tests/test_github_ingest.py`
+  (`test_clone_checkout_commands_enable_windows_longpaths`),
+  `tests/test_repo_context.py` (expo parametrize cases),
+  `tests/test_snapshot.py`, `tests/test_patchset_guard.py`.

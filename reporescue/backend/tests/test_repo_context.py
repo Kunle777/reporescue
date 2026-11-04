@@ -56,6 +56,10 @@ def test_inventory_lists_project_files(tmp_path):
         "dist/out.js",
         "demo.egg-info/PKG-INFO",
         ".tox/py311/x.py",
+        ".expo/settings.json",
+        "frontend/.expo/web/cache/production/images/icon.png",
+        ".output/server/index.mjs",
+        ".turbo/run.log",
     ],
 )
 def test_inventory_excludes_irrelevant_dirs(tmp_path, junk):

@@ -292,9 +292,9 @@ def test_context_rejects_bad_mode(monkeypatch, project_dir, owner):
             record,
             ingestion_id=record["ingestion_id"],
             owner_id=owner,
-            mode="general",
+            mode="bogus",
         )
-    assert exc_info.value.reason == "bad_plan"
+    assert exc_info.value.reason == "bad_mode"
 
 
 def test_context_caps_excerpts_and_message(monkeypatch, project_dir, owner):
@@ -397,10 +397,11 @@ def test_plan_for_mode_debug_variants():
     assert plan_for_mode("health", bare).plan_id == "health"
 
 
-def test_plan_for_mode_rejects_general_unknown_and_unrunnable():
+def test_plan_for_mode_resolves_general_and_rejects_unknown_and_unrunnable():
     caps: dict = {"runnable": {"python": False, "reason": "x"}, "test_frameworks": []}
+    assert plan_for_mode("general", caps).plan_id == "general"
     with pytest.raises(UnknownPlanError):
-        plan_for_mode("general", caps)
+        plan_for_mode("bogus", caps)
     with pytest.raises(UnknownPlanError):
         plan_for_mode("bogus", caps)
     nonpython = {"runnable": {"python": False, "reason": "unsupported_project"}, "test_frameworks": []}
@@ -914,6 +915,9 @@ def test_migrated_plans_have_explicit_runner_owned_stages():
             ("checks", "health_checks"),
             ("summarize", "health_summarize"),
         ),
+        "general": (
+            ("route", "general_route"),
+        ),
     }
     assert set(PLANS) == set(expected)
     for plan_id, stages in expected.items():
@@ -931,6 +935,7 @@ def test_production_handlers_resolve_lazily(monkeypatch):
         "static_evidence", "static_diagnose",
         "explain_context", "explain_summarize",
         "health_checks", "health_summarize",
+        "general_route",
     }
     # A directly registered handler wins over the lazy path (test seam).
     marker = _ok_handler("marker")

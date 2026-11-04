@@ -211,18 +211,18 @@ export default function SettingsView({
   }
 
   return (
-    <div>
-      <div className="view-head">
+    <div className="view-stack settings-view">
+      <header className="page-intro">
         <div>
+          <p className="eyebrow">ACCOUNT</p>
           <h2>Settings</h2>
-          <p>Your account and current session.</p>
+          <p>Manage your profile, connected identity, and active session.</p>
         </div>
-      </div>
+      </header>
 
-      <section className="card">
-        <div className="card-head">
-          <h3>Account</h3>
-        </div>
+      <div className="settings-layout">
+      <section className="surface-section account-section">
+        <div className="section-title-row"><div><p className="eyebrow">PROFILE</p><h3>Account</h3></div></div>
         {profileError && <div className="banner banner-error" role="alert"><AlertTriangle size={17} /><div><strong>Profile could not be loaded</strong><p>{profileError}</p></div></div>}
         <dl className="kv-list">
           <div className="kv-row">
@@ -246,10 +246,8 @@ export default function SettingsView({
         </dl>
       </section>
 
-      <section className="card">
-        <div className="card-head">
-          <h3>Username</h3>
-        </div>
+      <section className="surface-section username-section">
+        <div className="section-title-row"><div><p className="eyebrow">PUBLIC IDENTITY</p><h3>Username</h3></div></div>
         {!profileLoaded ? (
           <p className="hint">Loading username…</p>
         ) : (
@@ -292,10 +290,8 @@ export default function SettingsView({
         )}
       </section>
 
-      <section className="card">
-        <div className="card-head">
-          <h3>GitHub</h3>
-        </div>
+      <section className="surface-section github-section">
+        <div className="section-title-row"><div><p className="eyebrow">CONNECTED IDENTITY</p><h3>GitHub</h3></div></div>
         {!profileLoaded ? (
           <p className="hint">Loading GitHub status…</p>
         ) : github ? (
@@ -415,10 +411,8 @@ export default function SettingsView({
         )}
       </section>
 
-      <section className="card">
-        <div className="card-head">
-          <h3>Session</h3>
-        </div>
+      <section className="surface-section session-section">
+        <div className="section-title-row"><div><p className="eyebrow">SECURITY</p><h3>Session</h3></div></div>
         <dl className="kv-list">
           <div className="kv-row">
             <dt>Access token expires</dt>
@@ -432,6 +426,7 @@ export default function SettingsView({
           <LogOut size={15} /> Sign out
         </button>
       </section>
+      </div>
     </div>
   );
 }

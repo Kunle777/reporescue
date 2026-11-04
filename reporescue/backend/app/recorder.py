@@ -78,6 +78,8 @@ class ProgressRecorder(Protocol):
     ) -> UUID | None: ...
     def record_message(self, *, role: str, content: str) -> UUID | None: ...
     def record_partial(self, data: dict[str, Any]) -> None: ...
+    def record_routing(self, selected_mode: str, routing: dict[str, Any]) -> None: ...
+    def note_progress(self, detail: str) -> None: ...
     def check_cancelled(self) -> None: ...
 
 
@@ -147,6 +149,31 @@ class DBRecorder:
                 return
             partial = dict(investigation.partial or {})
             partial.update(data)
+            investigation.partial = partial
+            db.commit()
+
+    def record_routing(self, selected_mode: str, routing: dict[str, Any]) -> None:
+        """Persist the General route decision on the investigation row."""
+        if selected_mode not in ("debug", "explain", "health"):
+            return
+        with self._sessions() as db:
+            investigation = db.get(Investigation, self._investigation_id)
+            if investigation is None:
+                return
+            investigation.selected_mode = selected_mode
+            investigation.routing = dict(routing or {})
+            db.commit()
+
+    def note_progress(self, detail: str) -> None:
+        """Record liveness text inside a long stage without moving percent."""
+        if not detail:
+            return
+        with self._sessions() as db:
+            investigation = db.get(Investigation, self._investigation_id)
+            if investigation is None:
+                return
+            partial = dict(investigation.partial or {})
+            partial["stage_detail"] = detail[:500]
             investigation.partial = partial
             db.commit()
 

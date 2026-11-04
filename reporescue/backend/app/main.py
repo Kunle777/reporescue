@@ -71,7 +71,7 @@ class IngestRequest(BaseModel):
 class RealInvestigationRequest(BaseModel):
     ingestion_id: str
     max_attempts: int = 3
-    mode: Literal["debug", "explain", "health"] = "debug"
+    mode: Literal["debug", "explain", "health", "general"] = "debug"
     message: str | None = None
 
 
@@ -133,7 +133,7 @@ class GitHubSyncRequest(BaseModel):
 
 class JobCreate(BaseModel):
     ingestion_id: str
-    mode: Literal["debug", "explain", "health"] = "debug"
+    mode: Literal["debug", "explain", "health", "general"] = "debug"
     message: str | None = None
     max_attempts: int = 3
     project_id: UUID | None = None
@@ -151,9 +151,31 @@ def _require_ingestion_owner(ingestion_id: str, user: AuthenticatedUser) -> None
         raise HTTPException(status_code=404, detail="Not found.")
 
 
+def _resolve_record(
+    ingestion_id: str, user: AuthenticatedUser, db: Session
+) -> dict[str, Any]:
+    """Return the caller record from memory or the durable snapshot row.
+
+    Memory first (fresh owner tag); durable snapshot rows keep the same
+    identifier valid across API restarts and browser refreshes. Unknown
+    ids and other owners rows are all 404: an unknown owner must never
+    read as "no owner".
+    """
+    owner = get_ingestion_owner(ingestion_id)
+    if owner is not None and owner == str(user.id):
+        return get_ingestion(ingestion_id)
+    row = jobqueue_module.get_snapshot_for_owner(
+        db, snapshot_id=ingestion_id, owner_id=user.id
+    )
+    if row is not None:
+        return jobqueue_module.snapshot_to_record(row)
+    raise HTTPException(status_code=404, detail="Not found.")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "RepoRescue API", "mode": "local-demo-no-model-calls"}
+    """Process liveness endpoint; it does not claim database readiness."""
+    return {"status": "ok", "service": "RepoRescue API"}
 
 
 @app.post("/api/demo/investigate")
@@ -163,26 +185,38 @@ def investigate(request: InvestigationRequest) -> dict[str, Any]:
 
 @app.post("/api/repos/ingest")
 def ingest_repo(
-    request: IngestRequest, user: AuthenticatedUser = Depends(get_current_user)
+    request: IngestRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     record = ingest_repository(request.url, request.ref)
     if record.get("status") == "complete" and record.get("ingestion_id"):
         set_ingestion_owner(record["ingestion_id"], str(user.id))
+        try:
+            jobqueue_module.save_snapshot_record(
+                db, owner_id=user.id, record=record
+            )
+        except Exception:
+            # The in-memory record still serves immediate flows; the
+            # durable row is a refresh-safety net, not a gate.
+            pass
     return record
 
 
 @app.get("/api/repos/{ingestion_id}")
 def get_repo(
-    ingestion_id: str, user: AuthenticatedUser = Depends(get_current_user)
+    ingestion_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_ingestion_owner(ingestion_id, user)
-    return get_ingestion(ingestion_id)
+    return _resolve_record(ingestion_id, user, db)
 
 
 @app.post("/api/investigations")
 def start_real_investigation(
     request: RealInvestigationRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Run an investigation synchronously through shared orchestration.
 
@@ -190,8 +224,7 @@ def start_real_investigation(
     executes it through the same ``execute()`` entry point the worker
     uses; responses keep the exact historical per-mode shapes.
     """
-    _require_ingestion_owner(request.ingestion_id, user)
-    record = get_ingestion(request.ingestion_id)
+    record = _resolve_record(request.ingestion_id, user, db)
     try:
         ctx = build_context_from_record(
             record,
@@ -288,8 +321,7 @@ def create_job_route(
     the worker re-ingests from the pinned SHA, so execution never depends
     on the API process's in-memory store.
     """
-    _require_ingestion_owner(body.ingestion_id, user)
-    record = get_ingestion(body.ingestion_id)
+    record = _resolve_record(body.ingestion_id, user, db)
     if record.get("status") != "complete":
         raise HTTPException(
             status_code=422,

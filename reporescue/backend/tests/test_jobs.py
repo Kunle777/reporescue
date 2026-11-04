@@ -38,6 +38,7 @@ from app.jobqueue import (
     list_job_cards,
     recover_stale_jobs,
     release_to_waiting,
+    save_snapshot_record,
     utcnow,
 )
 from app.meta_client import MetaAPIError, MetaRateLimitError
@@ -184,7 +185,7 @@ def test_create_without_message_has_no_message_row(db, owner):
 
 def test_create_rejects_unknown_mode(db, owner):
     with pytest.raises(InvalidMode):
-        _create(db, owner, mode="general")
+        _create(db, owner, mode="bogus")
 
 
 def test_create_truncates_long_message(db, owner):
@@ -788,6 +789,35 @@ def test_create_job_route_missing_ingestion_is_404(db, owner):
     body = main_module.JobCreate(ingestion_id="missing")
     with pytest.raises(HTTPException) as exc_info:
         main_module.create_job_route(body, _user(owner), db)
+    assert exc_info.value.status_code == 404
+
+
+def test_create_job_route_survives_restart_via_snapshot(db, owner, monkeypatch, project_dir):
+    record = _owned_ingestion(monkeypatch, project_dir, owner)
+    row = save_snapshot_record(db, owner_id=owner, record=record)
+    assert row is not None
+    clear_ingestions()  # simulate API process restart: memory gone, DB row remains
+
+    body = main_module.JobCreate(
+        ingestion_id=record["ingestion_id"], mode="general", message="take a look"
+    )
+    result = main_module.create_job_route(body, _user(owner), db)
+    assert result["status"] == "queued"
+    investigation = db.get(Investigation, uuid.UUID(result["investigation_id"]))
+    assert investigation.mode == "general"
+    assert investigation.repo_name == "acme/calc"
+    assert investigation.commit_sha == FAKE_SHA
+    assert investigation.project_id is None
+
+
+def test_snapshot_rows_are_owner_isolated(db, owner, other_owner, monkeypatch, project_dir):
+    record = _owned_ingestion(monkeypatch, project_dir, owner)
+    save_snapshot_record(db, owner_id=owner, record=record)
+    clear_ingestions()
+
+    body = main_module.JobCreate(ingestion_id=record["ingestion_id"])
+    with pytest.raises(HTTPException) as exc_info:
+        main_module.create_job_route(body, _user(other_owner), db)
     assert exc_info.value.status_code == 404
 
 

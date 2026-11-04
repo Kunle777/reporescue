@@ -282,10 +282,10 @@ export default function Login() {
 
   if (screen === "forgot") {
     return (
-      <div>
+      <div className="auth-form-view">
         <form onSubmit={(event) => void forgot(event)} className="form-stack">
           <div>
-            <h3 className="verify-title">Reset your password</h3>
+            <h1 className="verify-title">Reset your password</h1>
             <p className="hint">
               Enter your account email and we will send a reset link.
             </p>
@@ -347,9 +347,14 @@ export default function Login() {
   }
 
   return (
-    <div>
+    <div className="auth-form-view">
+      <div className="auth-form-heading">
+        <p className="eyebrow">ACCOUNT ACCESS</p>
+        <h1>{mode === "signin" ? "Welcome back" : "Create your account"}</h1>
+        <p>{mode === "signin" ? "Sign in to continue to your engineering workspace." : "A focused workspace for understanding and verifying repository changes."}</p>
+      </div>
       {callbackError && (
-        <div className="banner banner-error">
+        <div className="banner banner-error" role="alert">
           <AlertTriangle size={17} />
           <div>
             <strong>That link did not work</strong>
@@ -357,7 +362,7 @@ export default function Login() {
           </div>
         </div>
       )}
-      <form onSubmit={(event) => void submit(event)} className="form-stack">
+      <form onSubmit={(event) => void submit(event)} className="form-stack auth-form">
         {mode === "signup" && (
           <div className="field">
             <label className="label" htmlFor="login-username">
@@ -497,7 +502,7 @@ export default function Login() {
         </div>
       </div>
       {error && (
-        <div className="banner banner-error">
+        <div className="banner banner-error" role="alert">
           <AlertTriangle size={17} />
           <div>
             <strong>Authentication failed</strong>

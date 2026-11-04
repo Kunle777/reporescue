@@ -380,6 +380,32 @@ def test_temporary_workspace_removes_readonly_files():
     assert not workspace.exists()
 
 
+def test_clone_checkout_commands_enable_windows_longpaths(tmp_path, monkeypatch):
+    calls = []
+    sha = "c" * 40
+
+    def fake_run(args, **kwargs):
+        argv = list(args)
+        calls.append(argv)
+        if "clone" in argv:
+            (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=sha + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    pinned = clone_and_pin(
+        "https://github.com/octocat/Hello-World", tmp_path / "repo", ref="main"
+    )
+    assert pinned == sha
+    writers = [c for c in calls if "clone" in c or "fetch" in c or "checkout" in c]
+    assert len(writers) == 3
+    for argv in writers:
+        assert argv[0] == "git"
+        assert "-c" in argv and "core.longpaths=true" in argv
+
+
 def test_clone_into_workspace_leaves_no_residue(tmp_path):
     source = tmp_path / "source"
     make_git_repo(source, DEMO_FILES)

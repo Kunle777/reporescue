@@ -85,6 +85,9 @@ def test_unsafe_local_enabled_only_by_explicit_flag(monkeypatch):
 
 
 def test_select_backend_prefers_docker(monkeypatch):
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+    monkeypatch.delenv("REPORESCUE_MODAL_USE_SDK_CONFIG", raising=False)
     monkeypatch.setattr(DockerBackend, "is_available", lambda self: (True, "up"))
     backend, error = select_backend()
     assert error is None
@@ -92,6 +95,9 @@ def test_select_backend_prefers_docker(monkeypatch):
 
 
 def test_select_backend_never_silently_falls_back(monkeypatch):
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+    monkeypatch.delenv("REPORESCUE_MODAL_USE_SDK_CONFIG", raising=False)
     monkeypatch.setattr(DockerBackend, "is_available", lambda self: (False, "down"))
     backend, error = select_backend()
     assert backend is None
@@ -101,6 +107,9 @@ def test_select_backend_never_silently_falls_back(monkeypatch):
 
 
 def test_select_backend_uses_flagged_local(monkeypatch):
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+    monkeypatch.delenv("REPORESCUE_MODAL_USE_SDK_CONFIG", raising=False)
     monkeypatch.setattr(DockerBackend, "is_available", lambda self: (False, "down"))
     monkeypatch.setenv(UNSAFE_LOCAL_FLAG, "1")
     backend, error = select_backend()
