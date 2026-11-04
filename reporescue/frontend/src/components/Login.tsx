@@ -581,7 +581,7 @@ export function ResetPasswordForm() {
   }
 
   return (
-    <div>
+    <div className="column-stack">
       <form onSubmit={(event) => void submit(event)} className="form-stack">
         <div className="field">
           <label className="label" htmlFor="reset-password">

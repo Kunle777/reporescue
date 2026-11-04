@@ -229,7 +229,7 @@ export default function SettingsView({
             <dt>Email</dt>
             <dd>{user?.email ?? "—"}</dd>
           </div>
-<div className="kv-row">
+          <div className="kv-row">
             <dt>Signed in with</dt>
             <dd>{provider ?? "—"}</dd>
           </div>

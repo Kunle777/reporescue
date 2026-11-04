@@ -3,7 +3,7 @@ import type { View } from "../lib/types";
 
 const TITLES: Record<View, string> = {
   dashboard: "Dashboard",
-  projects: "Projects",
+  projects: "Repositories",
   workbench: "Workbench",
   settings: "Settings",
 };
@@ -27,7 +27,7 @@ export default function Topbar({
         <h1 className="topbar-title">{TITLES[view]}</h1>
       </div>
       <div className="topbar-right">
-        {view !== "workbench" && <button type="button" className="btn btn-primary btn-sm topbar-start" onClick={onStartInvestigation}><FlaskConical size={15} /> New investigation</button>}
+        {view !== "workbench" && <button type="button" className="btn btn-primary btn-sm topbar-start" onClick={onStartInvestigation}><FlaskConical size={15} /> <span>New investigation</span></button>}
         <div className="account-chip" title={email ?? "Account"}>
           <span className="account-initial" aria-hidden="true">{email?.[0]?.toUpperCase() ?? "A"}</span>
           {email && <span className="account-email">{email}</span>}
