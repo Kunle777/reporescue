@@ -233,13 +233,22 @@ def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None
         return False
 
 
-def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False, global_only: bool = False) -> None:
+def _reserve_ai_usage(
+    db: Session,
+    user: AuthenticatedUser,
+    *,
+    debug: bool = False,
+    global_only: bool = False,
+    commit: bool = True,
+) -> None:
     """Reserve quota before accepting work that can spend Meta API credits."""
     try:
         if global_only:
-            reserve_global_call(db)
+            reserve_global_call(db, commit=commit)
         else:
-            reserve_operation(db, user_id=str(user.id), include_debug=debug)
+            reserve_operation(
+                db, user_id=str(user.id), include_debug=debug, commit=commit
+            )
     except UsageLimitExceeded as exc:
         raise HTTPException(
             status_code=429,
@@ -260,6 +269,66 @@ def get_usage_quota(
 ) -> dict[str, Any]:
     """Return the authenticated user's daily AI and Debug allowances."""
     return usage_status(db, user_id=str(user.id))
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _begin_idempotent_request(
+    db: Session,
+    *,
+    owner_id: UUID,
+    scope: str,
+    request_key: str,
+    payload: dict[str, Any],
+) -> tuple[IdempotencyRecord | None, dict[str, Any] | None]:
+    """Create a unique request claim or return the exact cached response."""
+    fingerprint = _request_fingerprint(payload)
+    record = IdempotencyRecord(
+        owner_id=owner_id,
+        scope=scope,
+        request_key=request_key,
+        request_hash=fingerprint,
+        status="processing",
+    )
+    db.add(record)
+    try:
+        db.flush()
+        return record, None
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.owner_id == owner_id,
+                IdempotencyRecord.scope == scope,
+                IdempotencyRecord.request_key == request_key,
+            )
+        )
+        if existing is None:
+            raise HTTPException(status_code=409, detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "This request key is already in use. Start a new request.",
+            })
+        if existing.request_hash != fingerprint:
+            raise HTTPException(status_code=409, detail={
+                "code": "IDEMPOTENCY_KEY_REUSED",
+                "message": "This request key belongs to a different request. Start a new request.",
+            })
+        if existing.status == "completed" and isinstance(existing.response, dict):
+            return None, existing.response
+        raise HTTPException(status_code=409, detail={
+            "code": "REQUEST_ALREADY_PROCESSING",
+            "message": "This request is already being processed. Wait or refresh before retrying.",
+        })
+
+
+def _complete_idempotent_request(
+    record: IdempotencyRecord, response: dict[str, Any]
+) -> None:
+    record.status = "completed"
+    record.response = response
 
 
 @app.post("/api/demo/investigate")
