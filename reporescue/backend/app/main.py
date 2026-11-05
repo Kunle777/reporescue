@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,7 @@ from .models import (
     Investigation,
     InvestigationMessage,
     Patch,
+    PatchFile,
 )
 
 app = FastAPI(
@@ -759,6 +760,283 @@ def get_investigation_route(
     if investigation is None:
         raise HTTPException(status_code=404, detail="Not found.")
     return jobqueue_module.investigation_detail(db, investigation)
+
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\\b"
+    r"(\\s*[:=]\\s*)[^\\s,;]+"
+)
+_BEARER_RE = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*")
+
+
+def _redact_conversation_text(value: object, limit: int = 1800) -> str:
+    text = str(value or "")
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _SECRET_VALUE_RE.sub(r"\\1\\2[REDACTED]", text)
+    return text[:limit]
+
+
+def _build_conversation_context(
+    db: Session, investigation: Investigation
+) -> tuple[dict[str, Any], list[dict[str, str]], set[str]]:
+    """Build bounded, owner-scoped context exclusively from persisted evidence."""
+    findings = db.scalars(
+        select(Finding)
+        .where(Finding.investigation_id == investigation.id)
+        .order_by(Finding.created_at.desc())
+        .limit(12)
+    ).all()
+    runs = db.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.investigation_id == investigation.id)
+        .order_by(ExecutionRun.created_at.desc())
+        .limit(8)
+    ).all()
+    attempts = db.scalars(
+        select(InvestigationAttempt)
+        .where(InvestigationAttempt.investigation_id == investigation.id)
+        .order_by(InvestigationAttempt.attempt_no.desc())
+        .limit(5)
+    ).all()
+    patches = db.scalars(
+        select(Patch)
+        .where(Patch.investigation_id == investigation.id)
+        .order_by(Patch.created_at.desc())
+        .limit(5)
+    ).all()
+    patch_ids = [patch.id for patch in patches]
+    patch_files: dict[UUID, list[str]] = {patch_id: [] for patch_id in patch_ids}
+    if patch_ids:
+        for patch_file in db.scalars(
+            select(PatchFile).where(PatchFile.patch_id.in_(patch_ids))
+        ).all():
+            patch_files[patch_file.patch_id].append(
+                _redact_conversation_text(patch_file.file, 300)
+            )
+
+    prior_rows = db.scalars(
+        select(InvestigationMessage)
+        .where(InvestigationMessage.investigation_id == investigation.id)
+        .order_by(InvestigationMessage.created_at.desc())
+        .limit(8)
+    ).all()
+    history = [
+        {"role": row.role, "content": _redact_conversation_text(row.content, 1200)}
+        for row in reversed(prior_rows)
+        if row.role in ("user", "assistant")
+    ]
+
+    report = investigation.final_report if isinstance(investigation.final_report, dict) else {}
+    evidence_ids: set[str] = set()
+    finding_context = []
+    for finding in findings:
+        evidence_id = f"finding:{finding.id}"
+        evidence_ids.add(evidence_id)
+        finding_context.append({
+            "evidence_id": evidence_id,
+            "kind": finding.kind,
+            "category": finding.category,
+            "title": _redact_conversation_text(finding.title, 300),
+            "detail": _redact_conversation_text(finding.detail, 1400),
+            "confidence": finding.confidence,
+            "evidence": _redact_conversation_text(
+                json.dumps(finding.evidence or {}, ensure_ascii=False, default=str), 1600
+            ),
+        })
+
+    run_context = []
+    for run in runs:
+        evidence_id = f"run:{run.id}"
+        evidence_ids.add(evidence_id)
+        failures = []
+        for failure in (run.failures or [])[:5]:
+            if isinstance(failure, dict):
+                failures.append({
+                    "test": _redact_conversation_text(failure.get("test"), 200),
+                    "kind": _redact_conversation_text(failure.get("kind"), 100),
+                    "message": _redact_conversation_text(failure.get("message"), 500),
+                    "traceback": _redact_conversation_text(failure.get("traceback"), 700),
+                })
+        run_context.append({
+            "evidence_id": evidence_id,
+            "kind": run.kind,
+            "status": run.status,
+            "passed": run.passed,
+            "exit_code": run.exit_code,
+            "command": _redact_conversation_text(run.command, 300),
+            "backend": run.backend,
+            "duration_ms": run.duration_ms,
+            "output": _redact_conversation_text(run.output, 1200),
+            "failures": failures,
+        })
+
+    context = {
+        "repository": {
+            "name": investigation.repo_name,
+            "url": investigation.repo_url,
+            "ref": investigation.ref,
+            "commit_sha": investigation.commit_sha,
+        },
+        "investigation": {
+            "id": str(investigation.id),
+            "requested_mode": investigation.mode,
+            "selected_mode": investigation.selected_mode,
+            "status": investigation.status,
+            "stage": investigation.stage,
+            "objective": _redact_conversation_text(investigation.user_message, 1200),
+            "verification_status": investigation.verification_status,
+            "stages_completed": list(investigation.stages_completed or [])[:20],
+            "error": (
+                {
+                    "reason": investigation.error.get("reason"),
+                    "message": _redact_conversation_text(investigation.error.get("message"), 800),
+                }
+                if isinstance(investigation.error, dict) else None
+            ),
+        },
+        "report": {
+            "summary": _redact_conversation_text(report.get("summary"), 1600),
+            "diagnosis": _redact_conversation_text(report.get("diagnosis"), 1600),
+            "verdict": report.get("verdict"),
+            "limitations": [
+                _redact_conversation_text(item, 300)
+                for item in (investigation.limitations or [])[:8]
+            ],
+            "routing": report.get("routing") if isinstance(report.get("routing"), dict) else investigation.routing,
+        },
+        "attempts": [
+            {
+                "attempt": attempt.attempt_no,
+                "diagnosis": _redact_conversation_text(attempt.diagnosis, 1000),
+                "confidence": attempt.confidence,
+                "guard": attempt.guard,
+                "verification": attempt.verification,
+            }
+            for attempt in attempts
+        ],
+        "findings": finding_context,
+        "execution_runs": run_context,
+        "patches": [
+            {
+                "status": patch.status,
+                "reason": _redact_conversation_text(patch.reason, 600),
+                "files": patch_files.get(patch.id, []),
+            }
+            for patch in patches
+        ],
+    }
+    return context, history, evidence_ids
+
+
+@app.post("/api/investigations/{investigation_id}/conversation", status_code=201)
+def send_investigation_message(
+    investigation_id: UUID,
+    body: ConversationMessageRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
+) -> dict[str, Any]:
+    """Answer a read-only follow-up using only this owned investigation's evidence."""
+    if not isinstance(idempotency_key, str):
+        idempotency_key = uuid4().hex
+    investigation = jobqueue_module.get_investigation_for_owner(
+        db, investigation_id=investigation_id, owner_id=user.id
+    )
+    if investigation is None:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    request_record, cached = _begin_idempotent_request(
+        db,
+        owner_id=user.id,
+        scope=f"conversation:{investigation_id}",
+        request_key=idempotency_key,
+        payload={"message": body.message.strip()},
+    )
+    if cached is not None:
+        return cached
+
+    try:
+        check_rate_limit("conversation", user)
+        try:
+            if meta_client_module.get_ai_mode() != "meta":
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "CONVERSATION_AI_UNAVAILABLE",
+                        "message": "Investigation Conversation requires Meta AI mode.",
+                    },
+                )
+            api_key = meta_client_module.get_api_key()
+        except meta_client_module.MetaConfigError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONVERSATION_AI_UNAVAILABLE",
+                    "message": "Investigation Conversation is not configured on the backend.",
+                },
+            ) from exc
+
+        context, history, allowed_evidence = _build_conversation_context(db, investigation)
+        _reserve_ai_usage(db, user, commit=False)
+        user_message = InvestigationMessage(
+            investigation_id=investigation.id,
+            role="user",
+            content=body.message.strip(),
+        )
+        db.add(user_message)
+        # Persist the request claim, user message and quota reservation before
+        # the provider call. A retry with this key can never trigger a second
+        # model call while the original request is in progress.
+        db.commit()
+
+        try:
+            model_result = meta_client_module.conversation_reply(
+                context=context,
+                history=history,
+                question=body.message.strip(),
+                api_key=api_key,
+            )
+            returned_ids = model_result["evidence_ids"]
+            valid_ids = [item for item in returned_ids if item in allowed_evidence]
+            invalid_ids = [item for item in returned_ids if item not in allowed_evidence]
+            grounding_status = (
+                "citation_issue" if invalid_ids
+                else "verified" if valid_ids
+                else "unverified"
+            )
+            answer = model_result["answer"]
+        except meta_client_module.MetaClientError:
+            answer = (
+                "I couldn't complete that response from the available investigation "
+                "evidence. No repository changes or commands were performed. "
+                "Please try again with a new message."
+            )
+            valid_ids = []
+            grounding_status = "unverified"
+
+        assistant_message = InvestigationMessage(
+            investigation_id=investigation.id,
+            role="assistant",
+            content=answer,
+            grounding_status=grounding_status,
+            evidence_ids=valid_ids,
+        )
+        db.add(assistant_message)
+        response = {
+            "user_message": {"role": "user", "content": user_message.content},
+            "assistant_message": {
+                "role": "assistant",
+                "content": answer,
+                "grounding_status": grounding_status,
+                "evidence_ids": valid_ids,
+            },
+        }
+        _complete_idempotent_request(request_record, response)
+        db.commit()
+        return response
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.get("/api/investigations/{investigation_id}/patch")
