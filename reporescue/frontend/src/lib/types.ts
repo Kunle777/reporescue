@@ -200,7 +200,14 @@ export type InvestigationDetail = {
     reason: string | null;
     files: { file: string; before: string | null; after: string | null }[];
   }[];
-  messages: { role: string; content: string }[];
+  messages: {
+    id?: string;
+    role: string;
+    content: string;
+    grounding_status?: "verified" | "unverified" | "citation_issue" | "non_factual" | null;
+    evidence_ids?: string[];
+    created_at?: string | null;
+  }[];
 };
 
 export function isTerminalStatus(status: JobStatus): boolean {
