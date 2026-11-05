@@ -17,6 +17,7 @@ from .db import get_db
 from .general import route_objective
 from .github_ingest import IngestionError
 from .rate_limit import check_rate_limit
+from .usage_quota import UsageLimitExceeded, reserve_operation, usage_status
 from .ingestion import (
     get_ingestion,
     get_ingestion_owner,
@@ -200,6 +201,32 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API"}
 
 
+def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False) -> None:
+    """Reserve quota before accepting work that can spend Meta API credits."""
+    try:
+        reserve_operation(db, user_id=str(user.id), include_debug=debug)
+    except UsageLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": exc.code,
+                "limit": exc.limit,
+                "timezone": "Africa/Lagos",
+                "resets_at": exc.reset_at.isoformat(),
+            },
+            headers={"Retry-After": str(max(1, int((exc.reset_at - datetime.now(exc.reset_at.tzinfo)).total_seconds())))},
+        ) from exc
+
+
+@app.get("/api/usage/quota")
+def get_usage_quota(
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the authenticated user's daily AI and Debug allowances."""
+    return usage_status(db, user_id=str(user.id))
+
+
 @app.post("/api/demo/investigate")
 def investigate(
     request: InvestigationRequest,
@@ -240,6 +267,7 @@ def _try_model_classification(text: str) -> dict[str, Any] | None:
 def classify_general_route(
     body: ClassifyRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Classify a General objective without creating a job.
 
@@ -256,6 +284,18 @@ def classify_general_route(
     signals = deterministic.get("signals", {})
     if deterministic.get("selected_mode") and deterministic.get("confidence") == "high":
         return {**deterministic, "source": "deterministic"}
+    # Classification only consumes quota when a Meta call is actually configured
+    # and the deterministic route was not already decisive.
+    model_ready = False
+    try:
+        model_ready = (
+            meta_client_module.get_ai_mode() == "meta"
+            and bool(meta_client_module.get_api_key())
+        )
+    except meta_client_module.MetaConfigError:
+        model_ready = False
+    if model_ready:
+        _reserve_ai_usage(db, user)
     model = _try_model_classification(text)
     if model is not None and model.get("selected_mode"):
         return {
@@ -322,6 +362,10 @@ def start_real_investigation(
     uses; responses keep the exact historical per-mode shapes.
     """
     record = _resolve_record(request.ingestion_id, user, db)
+    _reserve_ai_usage(
+        db, user,
+        debug=request.mode == "debug" or request.selected_mode == "debug",
+    )
     try:
         ctx = build_context_from_record(
             record,
@@ -440,6 +484,13 @@ def create_job_route(
     )
     profile = record["profile"]
     preselect = body.mode == "general"
+    inferred_mode = body.selected_mode
+    if preselect and inferred_mode is None:
+        inferred_mode = route_objective(body.message).get("selected_mode")
+    _reserve_ai_usage(
+        db, user,
+        debug=body.mode == "debug" or inferred_mode == "debug",
+    )
     try:
         investigation, job = jobqueue_module.create_investigation(
             db,
