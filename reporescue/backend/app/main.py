@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from sqlalchemy import desc, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config
@@ -52,6 +57,16 @@ from .orchestrate import (
     legacy_error_of,
 )
 from .request_logging import RequestTimingMiddleware
+from .models import (
+    ExecutionRun,
+    Finding,
+    IdempotencyRecord,
+    Investigation,
+    InvestigationMessage,
+    InvestigationAttempt,
+    Patch,
+    PatchFile,
+)
 
 app = FastAPI(
     title="RepoRescue API",
@@ -162,6 +177,10 @@ class JobCreate(BaseModel):
     routing_source: str | None = Field(default=None, max_length=40)
 
 
+class ConversationMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
 def _require_ingestion_owner(ingestion_id: str, user: AuthenticatedUser) -> None:
     """Reject records the caller does not own, including untagged records.
 
@@ -216,13 +235,22 @@ def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None
         return False
 
 
-def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False, global_only: bool = False) -> None:
+def _reserve_ai_usage(
+    db: Session,
+    user: AuthenticatedUser,
+    *,
+    debug: bool = False,
+    global_only: bool = False,
+    commit: bool = True,
+) -> None:
     """Reserve quota before accepting work that can spend Meta API credits."""
     try:
         if global_only:
-            reserve_global_call(db)
+            reserve_global_call(db, commit=commit)
         else:
-            reserve_operation(db, user_id=str(user.id), include_debug=debug)
+            reserve_operation(
+                db, user_id=str(user.id), include_debug=debug, commit=commit
+            )
     except UsageLimitExceeded as exc:
         raise HTTPException(
             status_code=429,
@@ -243,6 +271,66 @@ def get_usage_quota(
 ) -> dict[str, Any]:
     """Return the authenticated user's daily AI and Debug allowances."""
     return usage_status(db, user_id=str(user.id))
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _begin_idempotent_request(
+    db: Session,
+    *,
+    owner_id: UUID,
+    scope: str,
+    request_key: str,
+    payload: dict[str, Any],
+) -> tuple[IdempotencyRecord | None, dict[str, Any] | None]:
+    """Create a unique request claim or return the exact cached response."""
+    fingerprint = _request_fingerprint(payload)
+    record = IdempotencyRecord(
+        owner_id=owner_id,
+        scope=scope,
+        request_key=request_key,
+        request_hash=fingerprint,
+        status="processing",
+    )
+    db.add(record)
+    try:
+        db.flush()
+        return record, None
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.owner_id == owner_id,
+                IdempotencyRecord.scope == scope,
+                IdempotencyRecord.request_key == request_key,
+            )
+        )
+        if existing is None:
+            raise HTTPException(status_code=409, detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "This request key is already in use. Start a new request.",
+            })
+        if existing.request_hash != fingerprint:
+            raise HTTPException(status_code=409, detail={
+                "code": "IDEMPOTENCY_KEY_REUSED",
+                "message": "This request key belongs to a different request. Start a new request.",
+            })
+        if existing.status == "completed" and isinstance(existing.response, dict):
+            return None, existing.response
+        raise HTTPException(status_code=409, detail={
+            "code": "REQUEST_ALREADY_PROCESSING",
+            "message": "This request is already being processed. Wait or refresh before retrying.",
+        })
+
+
+def _complete_idempotent_request(
+    record: IdempotencyRecord, response: dict[str, Any]
+) -> None:
+    record.status = "completed"
+    record.response = response
 
 
 @app.post("/api/demo/investigate")
@@ -292,59 +380,83 @@ def classify_general_route(
     body: ClassifyRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=16, max_length=128),
 ) -> dict[str, Any]:
-    """Classify a General objective without creating a job.
-
-    Deterministic keyword routing first; the model is consulted only
-    for objectives that are not already high-confidence, with the
-    deterministic outcome as the fallback. A vague objective returns
-    ``needs_clarification`` with a follow-up question instead of a
-    route: the frontend shows the question and lets the user refine
-    the objective before anything is queued.
-    """
-    check_rate_limit("classify", user)
-    text = (body.message or "").strip()
-    deterministic = route_objective(text)
-    signals = deterministic.get("signals", {})
-    if deterministic.get("selected_mode") and deterministic.get("confidence") == "high":
-        return {**deterministic, "source": "deterministic"}
-    # Classification only consumes quota when a Meta call is actually configured
-    # and the deterministic route was not already decisive.
-    model_ready = False
-    try:
-        model_ready = (
-            meta_client_module.get_ai_mode() == "meta"
-            and bool(meta_client_module.get_api_key())
+    """Classify a General objective, caching repeat requests by idempotency key."""
+    request_record: IdempotencyRecord | None = None
+    if isinstance(idempotency_key, str) and idempotency_key:
+        profiles_module.get_or_create_profile(
+            db, user_id=user.id, username=username_attempt_from_claims(user.claims)
         )
-    except meta_client_module.MetaConfigError:
-        model_ready = False
-    if model_ready and isinstance(db, Session):
-        # Routing is part of the upcoming user operation: count its provider
-        # call globally, while the investigation itself consumes the user's
-        # single daily AI-operation allowance.
-        _reserve_ai_usage(db, user, global_only=True)
-    model = _try_model_classification(text)
-    if model is not None and model.get("selected_mode"):
-        return {
-            "selected_mode": model["selected_mode"],
-            "rationale": model["rationale"],
-            "confidence": model["confidence"],
-            "signals": signals,
-            "secondary_intents": deterministic.get("secondary_intents", []),
-            "source": "model",
-        }
-    if model is not None:
-        return {
-            "selected_mode": None,
-            "reason": "needs_clarification",
-            "question": model["question"],
-            "rationale": model["rationale"],
-            "confidence": "none",
-            "signals": signals,
-            "suggested_mode": deterministic.get("suggested_mode"),
-            "source": "model",
-        }
-    return {**deterministic, "source": "deterministic"}
+        request_record, cached = _begin_idempotent_request(
+            db,
+            owner_id=user.id,
+            scope="general_classify",
+            request_key=idempotency_key,
+            payload={"message": body.message.strip()},
+        )
+        if cached is not None:
+            return cached
+
+    try:
+        check_rate_limit("classify", user)
+        text = (body.message or "").strip()
+        deterministic = route_objective(text)
+        signals = deterministic.get("signals", {})
+        if (
+            deterministic.get("selected_mode")
+            and deterministic.get("confidence") == "high"
+        ):
+            response = {**deterministic, "source": "deterministic"}
+        else:
+            model_ready = False
+            try:
+                model_ready = (
+                    meta_client_module.get_ai_mode() == "meta"
+                    and bool(meta_client_module.get_api_key())
+                )
+            except meta_client_module.MetaConfigError:
+                model_ready = False
+
+            if model_ready:
+                # Classification is a distinct provider request but not a
+                # second user operation. The final investigation is charged
+                # once by POST /api/jobs.
+                _reserve_ai_usage(
+                    db, user, global_only=True, commit=request_record is None
+                )
+            model = _try_model_classification(text)
+            if model is not None and model.get("selected_mode"):
+                response = {
+                    "selected_mode": model["selected_mode"],
+                    "rationale": model["rationale"],
+                    "confidence": model["confidence"],
+                    "signals": signals,
+                    "secondary_intents": deterministic.get("secondary_intents", []),
+                    "source": "model",
+                }
+            elif model is not None:
+                response = {
+                    "selected_mode": None,
+                    "reason": "needs_clarification",
+                    "question": model["question"],
+                    "rationale": model["rationale"],
+                    "confidence": "none",
+                    "signals": signals,
+                    "suggested_mode": deterministic.get("suggested_mode"),
+                    "source": "model",
+                }
+            else:
+                response = {**deterministic, "source": "deterministic"}
+
+        if request_record is not None:
+            _complete_idempotent_request(request_record, response)
+            db.commit()
+        return response
+    except Exception:
+        if request_record is not None:
+            db.rollback()
+        raise
 
 
 @app.post("/api/repos/ingest")
@@ -491,40 +603,56 @@ def create_job_route(
     body: JobCreate,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
 ) -> dict[str, Any]:
-    """Enqueue a persistent background investigation.
+    """Enqueue one persistent investigation; repeat keys return the same job."""
+    # Direct Python callers in the isolated unit tests do not pass FastAPI
+    # headers. HTTP requests must provide the key; the fallback only keeps
+    # direct function invocation backwards-compatible.
+    if not isinstance(idempotency_key, str):
+        idempotency_key = uuid4().hex
 
-    Snapshots the repository coordinates from the owned ingestion record;
-    the worker re-ingests from the pinned SHA, so execution never depends
-    on the API process's in-memory store.
-    """
-    check_rate_limit("jobs", user)
-    record = _resolve_record(body.ingestion_id, user, db)
-    if record.get("status") != "complete":
-        raise HTTPException(
-            status_code=422,
-            detail="Ingestion record is no longer available; inspect the repository again.",
-        )
-    if body.project_id is not None:
-        project = projects_module.get_project(
-            db, owner_id=user.id, project_id=body.project_id
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Not found.")
     profiles_module.get_or_create_profile(
         db, user_id=user.id, username=username_attempt_from_claims(user.claims)
     )
-    profile = record["profile"]
-    preselect = body.mode == "general"
-    inferred_mode = body.selected_mode
-    if preselect and inferred_mode is None:
-        inferred_mode = route_objective(body.message).get("selected_mode")
-    if body.mode != "general" or inferred_mode is not None:
-        _reserve_ai_usage(
-            db, user,
-            debug=_is_container_backed_debug(record, inferred_mode or body.mode),
-        )
+    request_record, cached = _begin_idempotent_request(
+        db,
+        owner_id=user.id,
+        scope="create_investigation",
+        request_key=idempotency_key,
+        payload=body.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached
+
     try:
+        check_rate_limit("jobs", user)
+        record = _resolve_record(body.ingestion_id, user, db)
+        if record.get("status") != "complete":
+            raise HTTPException(
+                status_code=422,
+                detail="Ingestion record is no longer available; inspect the repository again.",
+            )
+        if body.project_id is not None:
+            project = projects_module.get_project(
+                db, owner_id=user.id, project_id=body.project_id
+            )
+            if project is None:
+                raise HTTPException(status_code=404, detail="Not found.")
+
+        profile = record["profile"]
+        preselect = body.mode == "general"
+        inferred_mode = body.selected_mode
+        if preselect and inferred_mode is None:
+            inferred_mode = route_objective(body.message).get("selected_mode")
+        if body.mode != "general" or inferred_mode is not None:
+            _reserve_ai_usage(
+                db,
+                user,
+                debug=_is_container_backed_debug(record, inferred_mode or body.mode),
+                commit=False,
+            )
+
         investigation, job = jobqueue_module.create_investigation(
             db,
             owner_id=user.id,
@@ -540,14 +668,22 @@ def create_job_route(
             preselect_rationale=body.routing_rationale if preselect else None,
             preselect_confidence=body.routing_confidence if preselect else None,
             preselect_source=body.routing_source if preselect else None,
+            commit=False,
         )
+        response = {
+            "job_id": str(job.id),
+            "investigation_id": str(investigation.id),
+            "status": job.status,
+        }
+        _complete_idempotent_request(request_record, response)
+        db.commit()
+        return response
     except InvalidMode as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return {
-        "job_id": str(job.id),
-        "investigation_id": str(investigation.id),
-        "status": job.status,
-    }
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.get("/api/jobs/active")
@@ -625,6 +761,283 @@ def get_investigation_route(
     if investigation is None:
         raise HTTPException(status_code=404, detail="Not found.")
     return jobqueue_module.investigation_detail(db, investigation)
+
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\\b"
+    r"(\\s*[:=]\\s*)[^\\s,;]+"
+)
+_BEARER_RE = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*")
+
+
+def _redact_conversation_text(value: object, limit: int = 1800) -> str:
+    text = str(value or "")
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _SECRET_VALUE_RE.sub(r"\\1\\2[REDACTED]", text)
+    return text[:limit]
+
+
+def _build_conversation_context(
+    db: Session, investigation: Investigation
+) -> tuple[dict[str, Any], list[dict[str, str]], set[str]]:
+    """Build bounded, owner-scoped context exclusively from persisted evidence."""
+    findings = db.scalars(
+        select(Finding)
+        .where(Finding.investigation_id == investigation.id)
+        .order_by(Finding.created_at.desc())
+        .limit(12)
+    ).all()
+    runs = db.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.investigation_id == investigation.id)
+        .order_by(ExecutionRun.created_at.desc())
+        .limit(8)
+    ).all()
+    attempts = db.scalars(
+        select(InvestigationAttempt)
+        .where(InvestigationAttempt.investigation_id == investigation.id)
+        .order_by(InvestigationAttempt.attempt_no.desc())
+        .limit(5)
+    ).all()
+    patches = db.scalars(
+        select(Patch)
+        .where(Patch.investigation_id == investigation.id)
+        .order_by(Patch.created_at.desc())
+        .limit(5)
+    ).all()
+    patch_ids = [patch.id for patch in patches]
+    patch_files: dict[UUID, list[str]] = {patch_id: [] for patch_id in patch_ids}
+    if patch_ids:
+        for patch_file in db.scalars(
+            select(PatchFile).where(PatchFile.patch_id.in_(patch_ids))
+        ).all():
+            patch_files[patch_file.patch_id].append(
+                _redact_conversation_text(patch_file.file, 300)
+            )
+
+    prior_rows = db.scalars(
+        select(InvestigationMessage)
+        .where(InvestigationMessage.investigation_id == investigation.id)
+        .order_by(InvestigationMessage.created_at.desc())
+        .limit(8)
+    ).all()
+    history = [
+        {"role": row.role, "content": _redact_conversation_text(row.content, 1200)}
+        for row in reversed(prior_rows)
+        if row.role in ("user", "assistant")
+    ]
+
+    report = investigation.final_report if isinstance(investigation.final_report, dict) else {}
+    evidence_ids: set[str] = set()
+    finding_context = []
+    for finding in findings:
+        evidence_id = f"finding:{finding.id}"
+        evidence_ids.add(evidence_id)
+        finding_context.append({
+            "evidence_id": evidence_id,
+            "kind": finding.kind,
+            "category": finding.category,
+            "title": _redact_conversation_text(finding.title, 300),
+            "detail": _redact_conversation_text(finding.detail, 1400),
+            "confidence": finding.confidence,
+            "evidence": _redact_conversation_text(
+                json.dumps(finding.evidence or {}, ensure_ascii=False, default=str), 1600
+            ),
+        })
+
+    run_context = []
+    for run in runs:
+        evidence_id = f"run:{run.id}"
+        evidence_ids.add(evidence_id)
+        failures = []
+        for failure in (run.failures or [])[:5]:
+            if isinstance(failure, dict):
+                failures.append({
+                    "test": _redact_conversation_text(failure.get("test"), 200),
+                    "kind": _redact_conversation_text(failure.get("kind"), 100),
+                    "message": _redact_conversation_text(failure.get("message"), 500),
+                    "traceback": _redact_conversation_text(failure.get("traceback"), 700),
+                })
+        run_context.append({
+            "evidence_id": evidence_id,
+            "kind": run.kind,
+            "status": run.status,
+            "passed": run.passed,
+            "exit_code": run.exit_code,
+            "command": _redact_conversation_text(run.command, 300),
+            "backend": run.backend,
+            "duration_ms": run.duration_ms,
+            "output": _redact_conversation_text(run.output, 1200),
+            "failures": failures,
+        })
+
+    context = {
+        "repository": {
+            "name": investigation.repo_name,
+            "url": investigation.repo_url,
+            "ref": investigation.ref,
+            "commit_sha": investigation.commit_sha,
+        },
+        "investigation": {
+            "id": str(investigation.id),
+            "requested_mode": investigation.mode,
+            "selected_mode": investigation.selected_mode,
+            "status": investigation.status,
+            "stage": investigation.stage,
+            "objective": _redact_conversation_text(investigation.user_message, 1200),
+            "verification_status": investigation.verification_status,
+            "stages_completed": list(investigation.stages_completed or [])[:20],
+            "error": (
+                {
+                    "reason": investigation.error.get("reason"),
+                    "message": _redact_conversation_text(investigation.error.get("message"), 800),
+                }
+                if isinstance(investigation.error, dict) else None
+            ),
+        },
+        "report": {
+            "summary": _redact_conversation_text(report.get("summary"), 1600),
+            "diagnosis": _redact_conversation_text(report.get("diagnosis"), 1600),
+            "verdict": report.get("verdict"),
+            "limitations": [
+                _redact_conversation_text(item, 300)
+                for item in (investigation.limitations or [])[:8]
+            ],
+            "routing": report.get("routing") if isinstance(report.get("routing"), dict) else investigation.routing,
+        },
+        "attempts": [
+            {
+                "attempt": attempt.attempt_no,
+                "diagnosis": _redact_conversation_text(attempt.diagnosis, 1000),
+                "confidence": attempt.confidence,
+                "guard": attempt.guard,
+                "verification": attempt.verification,
+            }
+            for attempt in attempts
+        ],
+        "findings": finding_context,
+        "execution_runs": run_context,
+        "patches": [
+            {
+                "status": patch.status,
+                "reason": _redact_conversation_text(patch.reason, 600),
+                "files": patch_files.get(patch.id, []),
+            }
+            for patch in patches
+        ],
+    }
+    return context, history, evidence_ids
+
+
+@app.post("/api/investigations/{investigation_id}/conversation", status_code=201)
+def send_investigation_message(
+    investigation_id: UUID,
+    body: ConversationMessageRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
+) -> dict[str, Any]:
+    """Answer a read-only follow-up using only this owned investigation's evidence."""
+    if not isinstance(idempotency_key, str):
+        idempotency_key = uuid4().hex
+    investigation = jobqueue_module.get_investigation_for_owner(
+        db, investigation_id=investigation_id, owner_id=user.id
+    )
+    if investigation is None:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    request_record, cached = _begin_idempotent_request(
+        db,
+        owner_id=user.id,
+        scope=f"conversation:{investigation_id}",
+        request_key=idempotency_key,
+        payload={"message": body.message.strip()},
+    )
+    if cached is not None:
+        return cached
+
+    try:
+        check_rate_limit("conversation", user)
+        try:
+            if meta_client_module.get_ai_mode() != "meta":
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "CONVERSATION_AI_UNAVAILABLE",
+                        "message": "Investigation Conversation requires Meta AI mode.",
+                    },
+                )
+            api_key = meta_client_module.get_api_key()
+        except meta_client_module.MetaConfigError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONVERSATION_AI_UNAVAILABLE",
+                    "message": "Investigation Conversation is not configured on the backend.",
+                },
+            ) from exc
+
+        context, history, allowed_evidence = _build_conversation_context(db, investigation)
+        _reserve_ai_usage(db, user, commit=False)
+        user_message = InvestigationMessage(
+            investigation_id=investigation.id,
+            role="user",
+            content=body.message.strip(),
+        )
+        db.add(user_message)
+        # Persist the request claim, user message and quota reservation before
+        # the provider call. A retry with this key can never trigger a second
+        # model call while the original request is in progress.
+        db.commit()
+
+        try:
+            model_result = meta_client_module.conversation_reply(
+                context=context,
+                history=history,
+                question=body.message.strip(),
+                api_key=api_key,
+            )
+            returned_ids = model_result["evidence_ids"]
+            valid_ids = [item for item in returned_ids if item in allowed_evidence]
+            invalid_ids = [item for item in returned_ids if item not in allowed_evidence]
+            grounding_status = (
+                "citation_issue" if invalid_ids
+                else "verified" if valid_ids
+                else "unverified"
+            )
+            answer = model_result["answer"]
+        except meta_client_module.MetaClientError:
+            answer = (
+                "I couldn't complete that response from the available investigation "
+                "evidence. No repository changes or commands were performed. "
+                "Please try again with a new message."
+            )
+            valid_ids = []
+            grounding_status = "unverified"
+
+        assistant_message = InvestigationMessage(
+            investigation_id=investigation.id,
+            role="assistant",
+            content=answer,
+            grounding_status=grounding_status,
+            evidence_ids=valid_ids,
+        )
+        db.add(assistant_message)
+        response = {
+            "user_message": {"role": "user", "content": user_message.content},
+            "assistant_message": {
+                "role": "assistant",
+                "content": answer,
+                "grounding_status": grounding_status,
+                "evidence_ids": valid_ids,
+            },
+        }
+        _complete_idempotent_request(request_record, response)
+        db.commit()
+        return response
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.get("/api/investigations/{investigation_id}/patch")
