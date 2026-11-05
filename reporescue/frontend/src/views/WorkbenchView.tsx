@@ -73,6 +73,43 @@ function pillKind(status: string) {
   return "status-pill";
 }
 
+function InvestigationSkeleton() {
+  return (
+    <section className="card workbench-results workbench-skeleton" aria-label="Loading investigation" aria-busy="true">
+      <div className="skeleton-header">
+        <div className="skeleton-stack">
+          <span className="skeleton-line skeleton-eyebrow" />
+          <span className="skeleton-line skeleton-title" />
+          <span className="skeleton-line skeleton-description" />
+          <span className="skeleton-line skeleton-meta" />
+        </div>
+        <span className="skeleton-pill" />
+      </div>
+      <div className="skeleton-progress"><span className="skeleton-line" /></div>
+      <div className="skeleton-tabs">
+        <span /><span /><span /><span /><span />
+      </div>
+      <div className="skeleton-content">
+        <span className="skeleton-line skeleton-section-title" />
+        <span className="skeleton-line skeleton-wide" />
+        <span className="skeleton-line skeleton-wide" />
+        <span className="skeleton-line skeleton-medium" />
+        <div className="skeleton-panel"><span className="skeleton-line skeleton-medium" /><span className="skeleton-line skeleton-wide" /><span className="skeleton-line skeleton-short" /></div>
+      </div>
+    </section>
+  );
+}
+
+function RecentInvestigationsSkeleton() {
+  return <div className="recent-list" aria-label="Loading recent investigations" aria-busy="true">
+    {[0, 1, 2].map((item) => <div className="recent-item recent-skeleton" key={item}>
+      <span className="skeleton-line skeleton-title" />
+      <span className="skeleton-line skeleton-meta" />
+      <span className="skeleton-line skeleton-short" />
+    </div>)}
+  </div>;
+}
+
 function DisplayValue({ value }: { value: unknown }) {
   if (value == null || value === "") return <span className="muted">Not recorded</span>;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return <>{String(value)}</>;
@@ -397,7 +434,8 @@ export default function WorkbenchView({
       </header>
 
 
-      {(jobError || adopting) && <div className={jobError ? "banner banner-error" : "banner banner-info"} role={jobError ? "alert" : "status"}>{jobError ? <AlertTriangle size={17} /> : <LoaderCircle size={17} className="spin" />}<div>{jobError || "Loading the investigation…"}</div>{jobError && <button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void reloadJob(jobId) : pendingJobId ? void reloadJob(pendingJobId) : selectedJobId ? void reloadJob(selectedJobId) : void refreshRecent()}>Retry</button>}</div>}
+      {jobError && <div className="banner banner-error" role="alert"><AlertTriangle size={17} /><div>{jobError}</div><button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void reloadJob(jobId) : pendingJobId ? void reloadJob(pendingJobId) : selectedJobId ? void reloadJob(selectedJobId) : void refreshRecent()}>Retry</button></div>}
+      {adopting && !jobDetail && !jobError && <InvestigationSkeleton />}
 
       {jobDetail && <section className="card workbench-results" aria-label="Investigation results">
         <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode === "general" && jobDetail.selected_mode ? `GENERAL \u2192 ${jobDetail.selected_mode.toUpperCase()} INVESTIGATION` : `${jobDetail.mode.toUpperCase()} INVESTIGATION`}</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
@@ -454,7 +492,7 @@ export default function WorkbenchView({
       </details>
       <aside className="recent-section history-rail" aria-labelledby="history-title">
         <div className="section-heading"><div><p className="eyebrow">SAVED WORK</p><h3 id="history-title">Recent investigations</h3></div></div>
-        {recentLoading ? <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Loading investigations…</div> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
+        {recentLoading ? <RecentInvestigationsSkeleton /> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
       </aside>
       </div>
     </div>
