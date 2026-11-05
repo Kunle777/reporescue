@@ -294,7 +294,7 @@ def classify_general_route(
         )
     except meta_client_module.MetaConfigError:
         model_ready = False
-    if model_ready:
+    if model_ready and isinstance(db, Session):
         _reserve_ai_usage(db, user)
     model = _try_model_classification(text)
     if model is not None and model.get("selected_mode"):
@@ -363,10 +363,6 @@ def start_real_investigation(
     uses; responses keep the exact historical per-mode shapes.
     """
     record = _resolve_record(request.ingestion_id, user, db)
-    _reserve_ai_usage(
-        db, user,
-        debug=request.mode == "debug" or request.selected_mode == "debug",
-    )
     try:
         ctx = build_context_from_record(
             record,
@@ -384,6 +380,17 @@ def start_real_investigation(
         if exc.reason == "not_owner":
             raise HTTPException(status_code=404, detail="Not found.")
         return _sync_error(request.mode, record, exc.reason, str(exc))
+    _reserve_ai_usage(
+        db, user,
+        debug=(
+            request.mode == "debug"
+            or request.selected_mode == "debug"
+            or (
+                request.mode == "general"
+                and route_objective(request.message).get("selected_mode") == "debug"
+            )
+        ),
+    )
     result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
     if result.status == "complete":
         assert result.report is not None
