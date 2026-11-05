@@ -28,11 +28,15 @@ export type Classification =
  * with a follow-up question instead of a route.
  */
 export async function classifyObjective(
-  message: string
+  message: string,
+  idempotencyKey?: string
 ): Promise<Classification> {
   return apiJson<Classification>("/api/general/classify", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+    },
     body: JSON.stringify({ message }),
   });
 }
