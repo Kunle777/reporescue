@@ -2477,6 +2477,84 @@ progress::-moz-progress-bar {
   color: var(--diff-add-text);
 }
 
+/* ---------- skeleton loading ---------- */
+
+.skeleton-line,
+.skeleton-pill,
+.skeleton-tabs span {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-tint);
+  border-radius: 7px;
+}
+
+.skeleton-line::after,
+.skeleton-pill::after,
+.skeleton-tabs span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--surface), transparent);
+  animation: rr-skeleton-shimmer 1.35s ease-in-out infinite;
+}
+
+@keyframes rr-skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+.workbench-skeleton {
+  padding: clamp(16px, 3vw, 28px);
+  min-height: 390px;
+}
+
+.skeleton-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.skeleton-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skeleton-eyebrow { width: 142px; height: 9px; }
+.skeleton-title { width: min(240px, 70%); height: 19px; }
+.skeleton-description { width: min(520px, 95%); height: 12px; }
+.skeleton-meta { width: 180px; height: 9px; }
+.skeleton-pill { width: 84px; height: 28px; flex: 0 0 auto; }
+.skeleton-progress { margin-top: 28px; padding: 12px 0; border-top: 1px solid var(--border); }
+.skeleton-progress .skeleton-line { height: 7px; width: 100%; }
+.skeleton-tabs { display: flex; gap: 9px; padding: 17px 0; border-bottom: 1px solid var(--border); }
+.skeleton-tabs span { width: 76px; height: 27px; }
+.skeleton-content { display: flex; flex-direction: column; gap: 14px; padding-top: 22px; }
+.skeleton-section-title { width: 170px; height: 16px; margin-bottom: 4px; }
+.skeleton-wide { width: 100%; height: 11px; }
+.skeleton-medium { width: 68%; height: 11px; }
+.skeleton-short { width: 38%; height: 11px; }
+.skeleton-panel { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); }
+
+.recent-skeleton {
+  cursor: default;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.recent-skeleton .skeleton-title { width: 72%; }
+.recent-skeleton .skeleton-meta { width: 48%; }
+.recent-skeleton .skeleton-short { width: 35%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line::after,
+  .skeleton-pill::after,
+  .skeleton-tabs span::after { animation: none; }
+}
+
 /* ---------- conversation ---------- */
 
 .conversation-history {
