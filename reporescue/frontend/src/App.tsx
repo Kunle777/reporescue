@@ -48,6 +48,10 @@ export default function App() {
     []
   );
 
+  const goNewInvestigation = useCallback(() => {
+    navigate({ view: "workbench", jobId: null, newInvestigation: true });
+  }, []);
+
   const openInvestigation = useCallback((jobId: string) => {
     navigate({ view: "workbench", jobId });
   }, []);
@@ -86,7 +90,8 @@ export default function App() {
   // unless the URL already selects an investigation. Read-only: restoring
   // never creates a duplicate investigation.
   useEffect(() => {
-    if (!session || readRoute().jobId) return;
+    const currentRoute = readRoute();
+    if (!session || currentRoute.jobId || currentRoute.newInvestigation) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -108,7 +113,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [session, signOut]);
+  }, [session, signOut, route.jobId, route.newInvestigation, route.view]);
 
   const handleUnauthorized = useCallback(async () => {
     await signOut();
@@ -158,7 +163,7 @@ export default function App() {
     <div className="app-shell">
       <Sidebar view={view} onNavigate={goView} />
       <div className="main">
-        <Topbar view={view} email={user?.email ?? null} username={username} onSignOut={() => void signOut()} onStartInvestigation={() => goView("workbench")} />
+        <Topbar view={view} email={user?.email ?? null} username={username} onSignOut={() => void signOut()} onStartInvestigation={goNewInvestigation} />
         <main className="content">
           {view === "dashboard" && (
             <DashboardView
@@ -186,7 +191,7 @@ export default function App() {
           )}
           <div hidden={view !== "workbench"}>
             <WorkbenchView
-              key={user?.id ?? "signed-out"}
+              key={`${user?.id ?? "signed-out"}:${route.newInvestigation ? "new" : route.jobId ?? "default"}` }
               session={session}
               projects={projects}
               projectsLoading={projectsLoading}
