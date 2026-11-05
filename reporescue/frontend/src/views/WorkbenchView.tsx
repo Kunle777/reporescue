@@ -6,7 +6,7 @@ import {
 import type { Session } from "@supabase/supabase-js";
 import { ApiError, apiJson } from "../lib/api";
 import { classifyObjective, type Classification } from "../lib/general";
-import { cancelJob, createJob, getJob, listJobs } from "../lib/jobs";
+import { cancelJob, createJob, getJob, listJobs, sendConversationMessage } from "../lib/jobs";
 import { Markdown } from "../lib/markdown";
 import { downloadInvestigationPatch } from "../lib/patches";
 import type { IngestResult, InvestigationDetail, InvestigationMode, JobCard, Project } from "../lib/types";
@@ -73,6 +73,43 @@ function pillKind(status: string) {
   return "status-pill";
 }
 
+function InvestigationSkeleton() {
+  return (
+    <section className="card workbench-results workbench-skeleton" aria-label="Loading investigation" aria-busy="true">
+      <div className="skeleton-header">
+        <div className="skeleton-stack">
+          <span className="skeleton-line skeleton-eyebrow" />
+          <span className="skeleton-line skeleton-title" />
+          <span className="skeleton-line skeleton-description" />
+          <span className="skeleton-line skeleton-meta" />
+        </div>
+        <span className="skeleton-pill" />
+      </div>
+      <div className="skeleton-progress"><span className="skeleton-line" /></div>
+      <div className="skeleton-tabs">
+        <span /><span /><span /><span /><span />
+      </div>
+      <div className="skeleton-content">
+        <span className="skeleton-line skeleton-section-title" />
+        <span className="skeleton-line skeleton-wide" />
+        <span className="skeleton-line skeleton-wide" />
+        <span className="skeleton-line skeleton-medium" />
+        <div className="skeleton-panel"><span className="skeleton-line skeleton-medium" /><span className="skeleton-line skeleton-wide" /><span className="skeleton-line skeleton-short" /></div>
+      </div>
+    </section>
+  );
+}
+
+function RecentInvestigationsSkeleton() {
+  return <div className="recent-list" aria-label="Loading recent investigations" aria-busy="true">
+    {[0, 1, 2].map((item) => <div className="recent-item recent-skeleton" key={item}>
+      <span className="skeleton-line skeleton-title" />
+      <span className="skeleton-line skeleton-meta" />
+      <span className="skeleton-line skeleton-short" />
+    </div>)}
+  </div>;
+}
+
 function DisplayValue({ value }: { value: unknown }) {
   if (value == null || value === "") return <span className="muted">Not recorded</span>;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return <>{String(value)}</>;
@@ -123,6 +160,9 @@ export default function WorkbenchView({
   const [downloadError, setDownloadError] = useState("");
   const [downloadedName, setDownloadedName] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Overview");
+  const [conversationDraft, setConversationDraft] = useState("");
+  const [conversationSending, setConversationSending] = useState(false);
+  const [conversationError, setConversationError] = useState("");
   const [adopting, setAdopting] = useState(false);
   const [usageQuota, setUsageQuota] = useState<UsageQuota | null>(null);
   const submitting = useRef(false);
@@ -248,6 +288,41 @@ export default function WorkbenchView({
     }
   }
 
+  async function sendConversation() {
+    const question = conversationDraft.trim();
+    if (!question || !jobDetail || !jobDetail.investigation_id || conversationSending) return;
+    setConversationSending(true);
+    setConversationError("");
+    const key = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `rr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      const reply = await sendConversationMessage(jobDetail.investigation_id, question, key);
+      setJobDetail((current) => {
+        if (!current || current.investigation_id !== jobDetail.investigation_id) return current;
+        return {
+          ...current,
+          messages: [
+            ...current.messages,
+            { role: "user", content: reply.user_message.content },
+            {
+              role: "assistant",
+              content: reply.assistant_message.content,
+              grounding_status: reply.assistant_message.grounding_status,
+              evidence_ids: reply.assistant_message.evidence_ids,
+            },
+          ],
+        };
+      });
+      setConversationDraft("");
+      void refreshQuota();
+    } catch (error) {
+      setConversationError(authError(error, "Could not send your follow-up. Please try again."));
+    } finally {
+      setConversationSending(false);
+    }
+  }
+
   function selectProject(id: string) {
     setProjectId(id);
     const selected = projects.find((project) => project.id === id);
@@ -300,24 +375,31 @@ export default function WorkbenchView({
       setJobError(`Job ${pendingJobId.slice(0, 8)} was accepted but its status has not loaded yet. Retry loading it before creating another investigation.`);
       return;
     }
+    // Lock synchronously before classification: two rapid clicks must not
+    // launch two model-backed preflight requests.
+    submitting.current = true;
+    const requestKey = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `rr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // General classifies first: a vague objective stops here with a
-    // follow-up question (repository selection and text are preserved)
-    // instead of queueing an investigation that cannot answer it.
+    // follow-up question (repository selection and text are preserved).
     let route: Extract<Classification, { selected_mode: InvestigationMode }> | null = null;
     if (mode === "general") {
       setClassifying(true);
       setInvestError("");
       setJobError("");
       try {
-        const result = await classifyObjective(userMessage);
+        const result = await classifyObjective(userMessage, requestKey);
         void refreshQuota();
         setClassification(result);
         if (!result.selected_mode) {
+          submitting.current = false;
           return;
         }
         route = result;
       } catch (error) {
         setInvestError(authError(error, "Could not classify the objective."));
+        submitting.current = false;
         return;
       } finally {
         setClassifying(false);
@@ -325,7 +407,6 @@ export default function WorkbenchView({
     } else {
       setClassification(null);
     }
-    submitting.current = true;
     setInvestLoading(true);
     setInvestError("");
     setJobError("");
@@ -335,6 +416,7 @@ export default function WorkbenchView({
         ingestion_id: ingestResult.ingestion_id,
         mode,
         message: userMessage,
+        idempotencyKey: requestKey,
         ...(projectId ? { project_id: projectId } : {}),
         ...(route
           ? {
@@ -397,7 +479,8 @@ export default function WorkbenchView({
       </header>
 
 
-      {(jobError || adopting) && <div className={jobError ? "banner banner-error" : "banner banner-info"} role={jobError ? "alert" : "status"}>{jobError ? <AlertTriangle size={17} /> : <LoaderCircle size={17} className="spin" />}<div>{jobError || "Loading the investigation…"}</div>{jobError && <button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void reloadJob(jobId) : pendingJobId ? void reloadJob(pendingJobId) : selectedJobId ? void reloadJob(selectedJobId) : void refreshRecent()}>Retry</button>}</div>}
+      {jobError && <div className="banner banner-error" role="alert"><AlertTriangle size={17} /><div>{jobError}</div><button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void reloadJob(jobId) : pendingJobId ? void reloadJob(pendingJobId) : selectedJobId ? void reloadJob(selectedJobId) : void refreshRecent()}>Retry</button></div>}
+      {adopting && !jobDetail && !jobError && <InvestigationSkeleton />}
 
       {jobDetail && <section className="card workbench-results" aria-label="Investigation results">
         <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode === "general" && jobDetail.selected_mode ? `GENERAL \u2192 ${jobDetail.selected_mode.toUpperCase()} INVESTIGATION` : `${jobDetail.mode.toUpperCase()} INVESTIGATION`}</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
@@ -411,7 +494,23 @@ export default function WorkbenchView({
           {tab === "Evidence" && <div className="result-list">{jobDetail.findings.some((finding) => hasEvidence(finding.evidence)) && jobDetail.findings.filter((finding) => hasEvidence(finding.evidence)).map((finding, index) => <article key={`evidence-${index}`} className="result-item"><h4>{finding.title}</h4><DisplayValue value={finding.evidence} /></article>)}{jobDetail.runs.map((run, index) => <article key={`run-evidence-${index}`} className="result-item"><h4>{run.kind} output</h4>{run.failures.map((failure, failureIndex) => <details key={failureIndex}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}{!run.failures.length && !run.output && <p className="muted">No execution evidence was recorded for this run.</p>}</article>)}{!jobDetail.findings.some((finding) => hasEvidence(finding.evidence)) && !jobDetail.runs.length && <EmptyResult title="No evidence recorded" text="Only repository and execution evidence returned by the backend is shown here." />}</div>}
           {tab === "Execution" && <div className="result-list">{jobDetail.runs.length ? jobDetail.runs.map((run, index) => <article key={`${run.kind}-${index}`} className="execution-card"><div className="result-item-heading"><h4>{run.kind}</h4><span className={pillKind(run.passed === true ? "passed" : run.passed === false ? "failed" : run.status || "not_run")}>{run.passed === true ? "tests passed" : run.passed === false ? "tests failed" : run.status || "not run"}</span></div><dl className="execution-meta"><div><dt>Provider</dt><dd>{run.backend || "Not reported"}</dd></div><div><dt>Isolation</dt><dd>{run.isolation || "Not reported"}</dd></div><div><dt>Exit code</dt><dd>{run.exit_code ?? "Not reported"}</dd></div><div><dt>Duration</dt><dd>{run.duration_ms == null ? "Not reported" : `${run.duration_ms} ms`}</dd></div>{run.command && <div><dt>Command</dt><dd><code>{run.command}</code></dd></div>}</dl>{run.install_ok != null && <p className="hint">Dependency installation: {run.install_ok ? "completed" : "failed"}</p>}{run.install_log && <details><summary>Dependency installation output</summary><pre className="output">{run.install_log}</pre></details>}{run.output && <details open><summary>Captured execution output</summary><pre className="output">{run.output}</pre></details>}{run.truncated && <p className="truncation-note" role="status">The backend truncated this execution output.</p>}{run.failures.map((failure, i) => <details key={i}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}</article>) : <EmptyResult title="No execution run recorded" text="This investigation has no execution output. Static analysis does not imply that code was executed." />}</div>}
           {tab === "Changes" && <div className="result-list">{appliedPatch && <article className="result-item patch-card"><div className="result-item-heading"><h4>Download patch</h4><span className={pillKind(patchVerified ? "verified" : "unverified")}>{patchVerified ? "verified" : "unverified"}</span></div><p className="hint">{patchVerified ? "Unified diff of the guarded patch for this investigation. Downloading saves the file and never modifies your repositories." : "Verification did not pass. This file is provided for inspection only; downloading saves the file and never modifies your repositories."}</p><p className="hint">{patchStatusNote(appliedPatch.status)}</p>{appliedPatch.files.length > 0 && <div><p className="eyebrow">AFFECTED FILES</p><ul className="affected-files">{appliedPatch.files.map((file, fileIndex) => <li key={fileIndex}><code>{file.file}</code></li>)}</ul></div>}<div className="patch-actions"><button type="button" className="btn btn-primary" onClick={() => void downloadPatch()} disabled={downloading}>{downloading ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}{downloading ? "Preparing\u2026" : downloadedName ? "Download again" : "Download .patch"}</button></div>{downloadedName && <p className="hint" role="status">Saved <code>{downloadedName}</code> to your browser’s download location.</p>}{downloadError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><p>{downloadError}</p></div></div>}<details className="howto"><summary>How to apply this patch</summary><Markdown text={patchHowTo(downloadedName ?? "reporescue-fix.patch", patchVerified)} />{!downloadedName && <p className="hint">The exact filename is shown after you download.</p>}</details></article>}{jobDetail.patches.length ? jobDetail.patches.map((patch, index) => <article key={index} className="result-item"><div className="result-item-heading"><h4>Patch proposal {index + 1}</h4><span className={pillKind(patch.status)}>{patch.status}</span></div>{patch.reason && <p>{patch.reason}</p>}{patch.files.map((file, fileIndex) => <div key={fileIndex} className="diff-block"><div className="file-tab"><FileCode2 size={14} /><code>{file.file}</code></div><pre className="diff removed">{file.before || "No before content returned"}</pre><pre className="diff added">{file.after || "No after content returned"}</pre></div>)}<p className="hint">{patchStatusNote(patch.status)}</p><p className="hint">{jobDetail.verification_status === "passed" ? "The backend reports passing verification for this investigation." : `Verification is ${jobDetail.verification_status}; this patch has not been confirmed as a fix.`}</p></article>) : <EmptyResult title="No patch returned" text="The backend has not recorded a proposed change for this investigation." />}</div>}
-          {tab === "Conversation" && <div className="conversation-history"><p className="hint">Persisted conversation history from the investigation response. Sending follow-up messages is not available on the current backend contract.</p>{jobDetail.messages.length ? jobDetail.messages.map((message, index) => <article className={`message-entry ${message.role}`} key={`${index}-${message.role}`}><span>{message.role}</span><div className="message-text"><Markdown text={message.content} /></div></article>) : <EmptyResult title="No conversation messages" text="The investigation detail currently contains no persisted messages." />}</div>}
+          {tab === "Conversation" && <div className="conversation-panel">
+            <div className="conversation-intro"><div><p className="eyebrow">INVESTIGATION ASSISTANT</p><h4>Ask about this investigation</h4><p>Follow up on findings, execution results and evidence. Replies are read-only and grounded in this investigation's saved record.</p></div><span className="conversation-scope">This investigation only</span></div>
+            <div className="conversation-history" aria-live="polite">
+              {jobDetail.messages.length ? jobDetail.messages.map((message, index) => <article className={`message-entry ${message.role}`} key={message.id ?? `${index}-${message.role}`}>
+                <span>{message.role === "assistant" ? "RepoRescue" : message.role}</span>
+                <div className="message-text"><Markdown text={message.content} /></div>
+                {message.role === "assistant" && message.grounding_status && <div className="message-grounding"><span className={pillKind(message.grounding_status)}>{message.grounding_status.replaceAll("_", " ")}</span>{message.evidence_ids?.length ? <span>Evidence: {message.evidence_ids.join(", ")}</span> : <span>No direct evidence citations</span>}</div>}
+              </article>) : <div className="conversation-empty"><CircleHelp size={20}/><strong>No messages yet</strong><p>Ask a question about this investigation's findings, logs, verification or proposed changes.</p></div>}
+              {conversationSending && <article className="message-entry assistant conversation-thinking" role="status"><span>RepoRescue</span><div className="thinking-dots"><i/><i/><i/></div><small>Checking the saved investigation evidence…</small></article>}
+            </div>
+            {conversationError && <div className="banner banner-error" role="alert">{conversationError}</div>}
+            <form className="conversation-composer" onSubmit={(event) => { event.preventDefault(); void sendConversation(); }}>
+              <label className="sr-only" htmlFor="investigation-followup">Ask a follow-up about this investigation</label>
+              <textarea id="investigation-followup" value={conversationDraft} onChange={(event) => setConversationDraft(event.target.value)} placeholder="Ask a follow-up about the findings or evidence…" rows={2} maxLength={2000} disabled={conversationSending}/>
+              <div className="conversation-compose-footer"><small>Read-only · No code changes or commands are run</small><button className="btn btn-primary" type="submit" disabled={!conversationDraft.trim() || conversationSending}>{conversationSending ? <><LoaderCircle size={15} className="spin"/> Thinking…</> : <><Play size={14}/> Send</>}</button></div>
+            </form>
+          </div>}
         </div>
       </section>}
 
@@ -454,7 +553,7 @@ export default function WorkbenchView({
       </details>
       <aside className="recent-section history-rail" aria-labelledby="history-title">
         <div className="section-heading"><div><p className="eyebrow">SAVED WORK</p><h3 id="history-title">Recent investigations</h3></div></div>
-        {recentLoading ? <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Loading investigations…</div> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
+        {recentLoading ? <RecentInvestigationsSkeleton /> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
       </aside>
       </div>
     </div>
