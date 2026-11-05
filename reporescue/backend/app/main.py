@@ -201,6 +201,21 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API"}
 
 
+def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None) -> bool:
+    """Apply the Debug allowance only when this request can reach a container."""
+    if selected_mode != "debug":
+        return False
+    profile = record.get("profile") if isinstance(record, dict) else None
+    capabilities = profile.get("capabilities", {}) if isinstance(profile, dict) else {}
+    runnable = capabilities.get("runnable", {}) if isinstance(capabilities, dict) else {}
+    if not isinstance(runnable, dict) or not runnable.get("python"):
+        return False
+    try:
+        return config.get_execution_backend() in ("auto", "modal", "docker")
+    except config.ConfigError:
+        return False
+
+
 def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False, global_only: bool = False) -> None:
     """Reserve quota before accepting work that can spend Meta API credits."""
     try:
@@ -398,7 +413,7 @@ def start_real_investigation(
     if request.mode != "general" or effective_mode is not None:
         _reserve_ai_usage(
             db, user,
-            debug=request.mode == "debug" or effective_mode == "debug",
+            debug=_is_container_backed_debug(record, effective_mode or request.mode),
         )
     result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
     if result.status == "complete":
@@ -507,7 +522,7 @@ def create_job_route(
     if body.mode != "general" or inferred_mode is not None:
         _reserve_ai_usage(
             db, user,
-            debug=body.mode == "debug" or inferred_mode == "debug",
+            debug=_is_container_backed_debug(record, inferred_mode or body.mode),
         )
     try:
         investigation, job = jobqueue_module.create_investigation(
