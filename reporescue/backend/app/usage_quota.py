@@ -65,7 +65,7 @@ def _reserve_counter(
         raise UsageLimitExceeded(code, limit, reset_at)
 
 
-def reserve_global_call(db: Session) -> None:
+def reserve_global_call(db: Session, *, commit: bool = True) -> None:
     """Reserve one shared application-wide slot for a Meta classification call."""
     day, reset_at = _today_and_reset()
     try:
@@ -74,7 +74,8 @@ def reserve_global_call(db: Session) -> None:
             limit=GLOBAL_AI_DAILY_LIMIT, code="GLOBAL_AI_DAILY_LIMIT_REACHED",
             reset_at=reset_at,
         )
-        db.commit()
+        if commit:
+            db.commit()
     except UsageLimitExceeded:
         db.rollback()
         raise
@@ -84,7 +85,7 @@ def reserve_global_call(db: Session) -> None:
 
 
 def reserve_operation(
-    db: Session, *, user_id: str, include_debug: bool = False
+    db: Session, *, user_id: str, include_debug: bool = False, commit: bool = True
 ) -> None:
     """Reserve one user AI operation, global AI slot, and optional Debug slot.
 
@@ -110,7 +111,8 @@ def reserve_operation(
                 limit=DEBUG_DAILY_USER_LIMIT, code="BETA_DAILY_DEBUG_LIMIT_REACHED",
                 reset_at=reset_at,
             )
-        db.commit()
+        if commit:
+            db.commit()
     except UsageLimitExceeded:
         db.rollback()
         raise

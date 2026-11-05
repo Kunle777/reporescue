@@ -91,6 +91,7 @@ def create_investigation(
     preselect_rationale: str | None = None,
     preselect_confidence: str | None = None,
     preselect_source: str | None = None,
+    commit: bool = True,
 ) -> tuple[Investigation, Job]:
     """Create a queued investigation plus its job, atomically.
 
@@ -149,9 +150,11 @@ def create_investigation(
         max_attempts=DEFAULT_MAX_ATTEMPTS,
     )
     db.add(job)
-    db.commit()
-    db.refresh(investigation)
-    db.refresh(job)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(investigation)
+        db.refresh(job)
     return investigation, job
 
 
@@ -653,6 +656,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "runs": [
             {
+                "id": str(run.id),
                 "kind": run.kind,
                 "command": run.command,
                 "backend": run.backend,
@@ -671,6 +675,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "findings": [
             {
+                "id": str(finding.id),
                 "kind": finding.kind,
                 "category": finding.category,
                 "title": finding.title,
@@ -689,7 +694,14 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
             for patch in patches
         ],
         "messages": [
-            {"role": message.role, "content": message.content}
+            {
+                "id": str(message.id),
+                "role": message.role,
+                "content": message.content,
+                "grounding_status": message.grounding_status,
+                "evidence_ids": list(message.evidence_ids or []),
+                "created_at": _iso(message.created_at),
+            }
             for message in messages
         ],
     }
