@@ -10,7 +10,7 @@ on PostgreSQL and on the isolated SQLite test database.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint, func
@@ -372,6 +372,8 @@ class InvestigationMessage(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    grounding_status: Mapped[str | None] = mapped_column(String(24))
+    evidence_ids: Mapped[list[Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -399,6 +401,52 @@ class ConversationSession(Base):
     context_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, default=dict
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DailyUsageCounter(Base):
+    """Atomic per-user and application-wide daily quota counter."""
+
+    __tablename__ = "daily_usage_counters"
+    __table_args__ = (
+        CheckConstraint("used >= 0", name="ck_daily_usage_used_nonnegative"),
+    )
+
+    scope_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    usage_date: Mapped[date] = mapped_column(primary_key=True)
+    quota_type: Mapped[str] = mapped_column(String(20), primary_key=True)
+    used: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+
+
+class IdempotencyRecord(Base):
+    """Durable request de-duplication record scoped to one owner and action."""
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "scope", "request_key",
+            name="uq_idempotency_owner_scope_key",
+        ),
+        CheckConstraint(
+            "status IN ('processing', 'completed')",
+            name="ck_idempotency_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    scope: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="processing")
+    response: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
