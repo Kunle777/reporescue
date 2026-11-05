@@ -656,6 +656,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "runs": [
             {
+                "id": str(run.id),
                 "kind": run.kind,
                 "command": run.command,
                 "backend": run.backend,
@@ -674,6 +675,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "findings": [
             {
+                "id": str(finding.id),
                 "kind": finding.kind,
                 "category": finding.category,
                 "title": finding.title,
