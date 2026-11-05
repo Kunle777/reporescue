@@ -47,6 +47,35 @@ export async function createJob(input: CreateJobInput): Promise<CreatedJob> {
   });
 }
 
+export type ConversationReply = {
+  user_message: { role: "user"; content: string };
+  assistant_message: {
+    role: "assistant";
+    content: string;
+    grounding_status: "verified" | "unverified" | "citation_issue" | "non_factual";
+    evidence_ids: string[];
+  };
+};
+
+/** Send a read-only follow-up scoped to one persisted investigation. */
+export async function sendConversationMessage(
+  investigationId: string,
+  message: string,
+  idempotencyKey: string
+): Promise<ConversationReply> {
+  return apiJson<ConversationReply>(
+    `/api/investigations/${encodeURIComponent(investigationId)}/conversation`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify({ message }),
+    }
+  );
+}
+
 /** Most recently updated non-terminal job, or null when there is none. */
 export async function getActiveJob(): Promise<InvestigationDetail | null> {
   try {
