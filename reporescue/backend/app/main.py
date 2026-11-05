@@ -17,7 +17,7 @@ from .db import get_db
 from .general import route_objective
 from .github_ingest import IngestionError
 from .rate_limit import check_rate_limit
-from .usage_quota import UsageLimitExceeded, reserve_operation, usage_status
+from .usage_quota import UsageLimitExceeded, reserve_global_call, reserve_operation, usage_status
 from .ingestion import (
     get_ingestion,
     get_ingestion_owner,
@@ -201,10 +201,13 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API"}
 
 
-def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False) -> None:
+def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False, global_only: bool = False) -> None:
     """Reserve quota before accepting work that can spend Meta API credits."""
     try:
-        reserve_operation(db, user_id=str(user.id), include_debug=debug)
+        if global_only:
+            reserve_global_call(db)
+        else:
+            reserve_operation(db, user_id=str(user.id), include_debug=debug)
     except UsageLimitExceeded as exc:
         raise HTTPException(
             status_code=429,
@@ -237,7 +240,7 @@ def investigate(
     this endpoint spends API quota, so anonymous callers are rejected."""
     check_rate_limit("demo", user)
     try:
-        if meta_client_module.get_ai_mode() == "meta":
+        if meta_client_module.get_ai_mode() == "meta" and isinstance(db, Session):
             _reserve_ai_usage(db, user)
     except meta_client_module.MetaConfigError:
         pass
@@ -301,7 +304,10 @@ def classify_general_route(
     except meta_client_module.MetaConfigError:
         model_ready = False
     if model_ready and isinstance(db, Session):
-        _reserve_ai_usage(db, user)
+        # Routing is part of the upcoming user operation: count its provider
+        # call globally, while the investigation itself consumes the user's
+        # single daily AI-operation allowance.
+        _reserve_ai_usage(db, user, global_only=True)
     model = _try_model_classification(text)
     if model is not None and model.get("selected_mode"):
         return {
