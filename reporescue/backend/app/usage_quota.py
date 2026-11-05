@@ -6,7 +6,7 @@ workers share the same limits. Dates follow Africa/Lagos calendar days.
 from __future__ import annotations
 
 import os
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -15,7 +15,18 @@ from sqlalchemy.orm import Session
 LAGOS = ZoneInfo("Africa/Lagos")
 AI_DAILY_USER_LIMIT = 10
 DEBUG_DAILY_USER_LIMIT = 3
-GLOBAL_AI_DAILY_LIMIT = max(1, int(os.getenv("REPORESCUE_GLOBAL_AI_DAILY_LIMIT", "100")))
+def _global_limit() -> int:
+    raw = os.getenv("REPORESCUE_GLOBAL_AI_DAILY_LIMIT", "100")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("REPORESCUE_GLOBAL_AI_DAILY_LIMIT must be a positive integer.") from exc
+    if value < 1:
+        raise ValueError("REPORESCUE_GLOBAL_AI_DAILY_LIMIT must be a positive integer.")
+    return value
+
+
+GLOBAL_AI_DAILY_LIMIT = _global_limit()
 
 
 class UsageLimitExceeded(Exception):
@@ -26,14 +37,14 @@ class UsageLimitExceeded(Exception):
         super().__init__(code)
 
 
-def _today_and_reset() -> tuple[object, datetime]:
+def _today_and_reset() -> tuple[date, datetime]:
     now = datetime.now(LAGOS)
     tomorrow = now.date() + timedelta(days=1)
     return now.date(), datetime.combine(tomorrow, time.min, tzinfo=LAGOS)
 
 
 def _reserve_counter(
-    db: Session, *, scope: str, day: object, kind: str, limit: int,
+    db: Session, *, scope: str, day: date, kind: str, limit: int,
     code: str, reset_at: datetime,
 ) -> None:
     # INSERT .. ON CONFLICT and the conditional UPDATE are atomic on both
@@ -118,17 +129,19 @@ def usage_status(db: Session, *, user_id: str) -> dict:
         """), {"scope": scope, "day": day, "kind": kind}).scalar_one_or_none()
         return int(value or 0)
 
+    ai_used = used(f"user:{user_id}", "ai")
+    debug_used = used(f"user:{user_id}", "debug")
     return {
         "timezone": "Africa/Lagos",
         "resets_at": reset_at.isoformat(),
         "ai": {
-            "used": used(f"user:{user_id}", "ai"),
+            "used": ai_used,
             "limit": AI_DAILY_USER_LIMIT,
-            "remaining": max(0, AI_DAILY_USER_LIMIT - used(f"user:{user_id}", "ai")),
+            "remaining": max(0, AI_DAILY_USER_LIMIT - ai_used),
         },
         "debug": {
-            "used": used(f"user:{user_id}", "debug"),
+            "used": debug_used,
             "limit": DEBUG_DAILY_USER_LIMIT,
-            "remaining": max(0, DEBUG_DAILY_USER_LIMIT - used(f"user:{user_id}", "debug")),
+            "remaining": max(0, DEBUG_DAILY_USER_LIMIT - debug_used),
         },
     }
