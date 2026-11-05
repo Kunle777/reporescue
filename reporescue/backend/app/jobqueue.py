@@ -692,7 +692,14 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
             for patch in patches
         ],
         "messages": [
-            {"role": message.role, "content": message.content}
+            {
+                "id": str(message.id),
+                "role": message.role,
+                "content": message.content,
+                "grounding_status": message.grounding_status,
+                "evidence_ids": list(message.evidence_ids or []),
+                "created_at": _iso(message.created_at),
+            }
             for message in messages
         ],
     }
