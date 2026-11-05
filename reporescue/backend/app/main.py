@@ -380,17 +380,14 @@ def start_real_investigation(
         if exc.reason == "not_owner":
             raise HTTPException(status_code=404, detail="Not found.")
         return _sync_error(request.mode, record, exc.reason, str(exc))
-    _reserve_ai_usage(
-        db, user,
-        debug=(
-            request.mode == "debug"
-            or request.selected_mode == "debug"
-            or (
-                request.mode == "general"
-                and route_objective(request.message).get("selected_mode") == "debug"
-            )
-        ),
-    )
+    effective_mode = request.selected_mode
+    if request.mode == "general" and effective_mode is None:
+        effective_mode = route_objective(request.message).get("selected_mode")
+    if request.mode != "general" or effective_mode is not None:
+        _reserve_ai_usage(
+            db, user,
+            debug=request.mode == "debug" or effective_mode == "debug",
+        )
     result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
     if result.status == "complete":
         assert result.report is not None
@@ -495,10 +492,11 @@ def create_job_route(
     inferred_mode = body.selected_mode
     if preselect and inferred_mode is None:
         inferred_mode = route_objective(body.message).get("selected_mode")
-    _reserve_ai_usage(
-        db, user,
-        debug=body.mode == "debug" or inferred_mode == "debug",
-    )
+    if body.mode != "general" or inferred_mode is not None:
+        _reserve_ai_usage(
+            db, user,
+            debug=body.mode == "debug" or inferred_mode == "debug",
+        )
     try:
         investigation, job = jobqueue_module.create_investigation(
             db,
