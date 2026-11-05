@@ -74,3 +74,11 @@ def test_ai_usage_status_never_exposes_global_counter(db):
     assert status["ai"]["limit"] == 10
     assert status["debug"]["limit"] == 3
     assert "global" not in str(status).lower()
+
+
+
+def test_classification_call_consumes_shared_budget_not_user_allowance(db):
+    from app.usage_quota import reserve_global_call
+
+    reserve_global_call(db)
+    assert usage_status(db, user_id="user-a")["ai"]["used"] == 0
