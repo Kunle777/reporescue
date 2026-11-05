@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config
@@ -52,6 +57,14 @@ from .orchestrate import (
     legacy_error_of,
 )
 from .request_logging import RequestTimingMiddleware
+from .models import (
+    ExecutionRun,
+    Finding,
+    IdempotencyRecord,
+    Investigation,
+    InvestigationMessage,
+    Patch,
+)
 
 app = FastAPI(
     title="RepoRescue API",
@@ -160,6 +173,10 @@ class JobCreate(BaseModel):
     routing_rationale: str | None = Field(default=None, max_length=2000)
     routing_confidence: Literal["high", "medium", "low"] | None = None
     routing_source: str | None = Field(default=None, max_length=40)
+
+
+class ConversationMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
 
 
 def _require_ingestion_owner(ingestion_id: str, user: AuthenticatedUser) -> None:
