@@ -12,6 +12,7 @@ export type CreateJobInput = {
   routing_rationale?: string;
   routing_confidence?: string;
   routing_source?: string;
+  idempotencyKey?: string;
 };
 
 export type CreatedJob = {
@@ -24,7 +25,10 @@ export type CreatedJob = {
 export async function createJob(input: CreateJobInput): Promise<CreatedJob> {
   return apiJson<CreatedJob>("/api/jobs", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : {}),
+    },
     body: JSON.stringify({
       ingestion_id: input.ingestion_id,
       mode: input.mode ?? "debug",
