@@ -36,7 +36,7 @@ export default function Topbar({
         <h1 className="topbar-title">{TITLES[view]}</h1>
       </div>
       <div className="topbar-right">
-        {view !== "workbench" && <button type="button" className="btn btn-primary btn-sm topbar-start" onClick={onStartInvestigation}><FlaskConical size={15} /> <span>New investigation</span></button>}
+        <button type="button" className="btn btn-primary btn-sm topbar-start" onClick={onStartInvestigation}><FlaskConical size={15} /> <span>New investigation</span></button>
         <button type="button" className="btn btn-quiet btn-sm" title={`Theme: ${preference} (switch to ${next})`} aria-label={`Theme: ${preference}. Activate to switch to ${next}.`} onClick={() => setPreference(next)}>
           <ThemeIcon size={15} />
         </button>
