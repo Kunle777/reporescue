@@ -303,6 +303,7 @@ def classify_general_route(
             "rationale": model["rationale"],
             "confidence": model["confidence"],
             "signals": signals,
+            "secondary_intents": deterministic.get("secondary_intents", []),
             "source": "model",
         }
     if model is not None:
