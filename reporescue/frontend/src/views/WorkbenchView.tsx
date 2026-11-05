@@ -375,24 +375,31 @@ export default function WorkbenchView({
       setJobError(`Job ${pendingJobId.slice(0, 8)} was accepted but its status has not loaded yet. Retry loading it before creating another investigation.`);
       return;
     }
+    // Lock synchronously before classification: two rapid clicks must not
+    // launch two model-backed preflight requests.
+    submitting.current = true;
+    const requestKey = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `rr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // General classifies first: a vague objective stops here with a
-    // follow-up question (repository selection and text are preserved)
-    // instead of queueing an investigation that cannot answer it.
+    // follow-up question (repository selection and text are preserved).
     let route: Extract<Classification, { selected_mode: InvestigationMode }> | null = null;
     if (mode === "general") {
       setClassifying(true);
       setInvestError("");
       setJobError("");
       try {
-        const result = await classifyObjective(userMessage);
+        const result = await classifyObjective(userMessage, requestKey);
         void refreshQuota();
         setClassification(result);
         if (!result.selected_mode) {
+          submitting.current = false;
           return;
         }
         route = result;
       } catch (error) {
         setInvestError(authError(error, "Could not classify the objective."));
+        submitting.current = false;
         return;
       } finally {
         setClassifying(false);
@@ -400,7 +407,6 @@ export default function WorkbenchView({
     } else {
       setClassification(null);
     }
-    submitting.current = true;
     setInvestLoading(true);
     setInvestError("");
     setJobError("");
@@ -410,6 +416,7 @@ export default function WorkbenchView({
         ingestion_id: ingestResult.ingestion_id,
         mode,
         message: userMessage,
+        idempotencyKey: requestKey,
         ...(projectId ? { project_id: projectId } : {}),
         ...(route
           ? {
