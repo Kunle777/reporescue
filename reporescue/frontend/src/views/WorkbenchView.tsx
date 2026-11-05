@@ -13,6 +13,14 @@ import type { IngestResult, InvestigationDetail, InvestigationMode, JobCard, Pro
 import { isTerminalStatus } from "../lib/types";
 
 const POLL_MS = 3000;
+
+type UsageQuota = {
+  timezone: string;
+  resets_at: string;
+  ai: { used: number; limit: number; remaining: number };
+  debug: { used: number; limit: number; remaining: number };
+};
+
 const INSPECT_TIMEOUT_MS = 150_000;
 
 const INGEST_REASON_LABELS: Record<string, string> = {
@@ -116,6 +124,7 @@ export default function WorkbenchView({
   const [downloadedName, setDownloadedName] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Overview");
   const [adopting, setAdopting] = useState(false);
+  const [usageQuota, setUsageQuota] = useState<UsageQuota | null>(null);
   const submitting = useRef(false);
   const polling = useRef(false);
   const loadSeq = useRef(0);
@@ -132,6 +141,19 @@ export default function WorkbenchView({
     }
     return errorMessage(error, fallback);
   }
+
+  async function refreshQuota() {
+    try {
+      setUsageQuota(await apiJson<UsageQuota>("/api/usage/quota"));
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onUnauthorized();
+    }
+  }
+
+  useEffect(() => {
+    if (session) void refreshQuota();
+    else setUsageQuota(null);
+  }, [session]);
 
   async function refreshRecent() {
     if (!session) return;
@@ -288,6 +310,7 @@ export default function WorkbenchView({
       setJobError("");
       try {
         const result = await classifyObjective(userMessage);
+        void refreshQuota();
         setClassification(result);
         if (!result.selected_mode) {
           return;
@@ -325,6 +348,7 @@ export default function WorkbenchView({
       if (!created.job_id || !created.investigation_id) throw new Error("The API did not return an investigation ID.");
       setPendingJobId(created.job_id);
       void refreshRecent();
+      void refreshQuota();
       try {
         const detail = await getJob(created.job_id);
         setJobDetail(detail);
@@ -422,7 +446,7 @@ export default function WorkbenchView({
         {classifying && <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Classifying the objective…</div>}
         {classification && !classification.selected_mode && <div role="alert" className="banner banner-warning"><CircleHelp size={17} /><div><strong>Objective needs clarification</strong><p>{classification.question ?? classification.rationale}</p><p className="hint">Refine the objective above and press Start again. The repository selection is preserved.</p></div></div>}
         {classification && classification.selected_mode && <div className="routing-note" role="status"><p className="eyebrow">GENERAL ROUTING</p><strong>Will run: {classification.selected_mode}</strong><p>{classification.rationale}</p><span>Routing confidence: {classification.confidence} · {classification.source}</span>{classification.secondary_intents?.length ? <p className="hint">Also detected: {classification.secondary_intents.join(", ")}. This run focuses on {classification.selected_mode}; start a separate investigation for the additional assessment.</p> : null}</div>}
-        <div className="setup-actions"><p className="hint">Inspection pins this repository snapshot. The queued job uses that snapshot and remains available after refresh.</p><button type="button" className="btn btn-primary" onClick={() => void startInvestigation()} disabled={investLoading}>{investLoading ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}{investLoading ? "Starting…" : "Start investigation"}</button></div>
+        <div className="setup-actions"><p className="hint">Inspection pins this repository snapshot. The queued job uses that snapshot and remains available after refresh.</p>{usageQuota && <p className="hint">Today: {usageQuota.ai.remaining}/{usageQuota.ai.limit} AI operations and {usageQuota.debug.remaining}/{usageQuota.debug.limit} Debug runs remaining · resets at midnight Africa/Lagos.</p>}<button type="button" className="btn btn-primary" onClick={() => void startInvestigation()} disabled={investLoading}>{investLoading ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}{investLoading ? "Starting…" : "Start investigation"}</button></div>
         {!ingestResult.profile.supported && <p className="capability-note" role="status">The API marked this repository as outside the currently supported execution profile. The backend determines whether the selected analysis can proceed.</p>}
         {investError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><strong>Investigation not started</strong><p>{investError}</p></div></div>}
       </section>}
