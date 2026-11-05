@@ -10,6 +10,7 @@ from app.meta_client import (
     MetaAPIError,
     MetaConfigError,
     MetaRateLimitError,
+    MetaRefusalError,
     MetaResponseError,
 )
 
@@ -138,7 +139,7 @@ def test_diagnose_success_sends_bounded_request(monkeypatch, workspace):
     }
     assert payload["model"] == "muse-spark-1.3"
     assert payload["reasoning_effort"] == "minimal"
-    assert payload["max_completion_tokens"] == meta_client.MAX_OUTPUT_TOKENS
+    assert payload["max_completion_tokens"] == meta_client.MAX_REPAIR_TOKENS
     assert "return price - discount" in payload["messages"][1]["content"]
     assert "FAILED tests/test_pricing.py" in payload["messages"][1]["content"]
     assert (workspace / "src" / "pricing.py").read_text(encoding="utf-8") == before
@@ -314,3 +315,217 @@ def test_diagnose_truncates_large_context(monkeypatch, workspace):
     user_content = payload["messages"][1]["content"]
     assert len(user_content) < meta_client.MAX_CONTEXT_CHARS + 8000
     assert "[truncated" in user_content
+
+
+def test_diagnose_extracts_text_content_blocks(monkeypatch, workspace):
+    monkeypatch.setenv("META_API_KEY", FAKE_KEY)
+    blocks = [
+        {"type": "reasoning", "text": "internal deliberation"},
+        {"type": "text", "text": json.dumps(VALID_OUTPUT)},
+    ]
+    _capture(monkeypatch, _ok_payload(blocks))
+
+    diagnosis, proposal = meta_client.diagnose_and_propose(
+        workspace=workspace, baseline=_baseline()
+    )
+    assert diagnosis == VALID_OUTPUT["diagnosis"]
+    assert proposal.file == "src/pricing.py"
+
+
+def test_extract_content_joins_text_blocks():
+    content, finish = meta_client._extract_content(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "hello"},
+                            {"type": "tool_use", "name": "ignored"},
+                            {"type": "text", "text": "world"},
+                        ]
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+    )
+    assert content == "hello\nworld"
+    assert finish == "stop"
+
+
+def test_extract_content_rejects_non_text_blocks():
+    with pytest.raises(MetaResponseError, match="no usable text"):
+        meta_client._extract_content(
+            {
+                "choices": [
+                    {
+                        "message": {"content": [{"type": "image"}]},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+
+
+def test_extract_content_refusal_raises():
+    with pytest.raises(MetaRefusalError, match="refused"):
+        meta_client._extract_content(
+            {
+                "choices": [
+                    {
+                        "message": {"refusal": "I cannot help.", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+
+
+def test_extract_content_filter_raises():
+    with pytest.raises(MetaRefusalError, match="content filtering"):
+        meta_client._extract_content(
+            {
+                "choices": [
+                    {
+                        "message": {"content": ""},
+                        "finish_reason": "content_filter",
+                    }
+                ]
+            }
+        )
+
+
+def test_extract_content_empty_truncated_names_token_limit():
+    with pytest.raises(MetaResponseError, match="truncated by the output-token limit"):
+        meta_client._extract_content(
+            {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+        )
+
+
+def test_extract_content_missing_message_keeps_legacy_message():
+    with pytest.raises(MetaResponseError, match="no message content"):
+        meta_client._extract_content({"choices": [{"finish_reason": "stop"}]})
+
+
+def test_extract_content_error_envelope_raises_api_error():
+    with pytest.raises(MetaAPIError, match="error envelope"):
+        meta_client._extract_content({"error": {"message": "Model overloaded."}})
+
+
+def test_diagnose_refusal_raises_without_retry(monkeypatch, workspace):
+    monkeypatch.setenv("META_API_KEY", FAKE_KEY)
+    _capture(
+        monkeypatch,
+        {
+            "choices": [
+                {
+                    "message": {"refusal": "No.", "content": ""},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    )
+    with pytest.raises(MetaRefusalError):
+        meta_client.diagnose_and_propose(
+            workspace=workspace, baseline=_baseline()
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (None, "api_error"),
+        (408, "api_error"),
+        (500, "api_error"),
+        (503, "api_error"),
+        (400, "api_rejected"),
+        (401, "api_rejected"),
+        (403, "api_rejected"),
+        (404, "api_rejected"),
+        (422, "api_rejected"),
+    ],
+)
+def test_api_error_reason(status, reason):
+    assert (
+        meta_client.api_error_reason(MetaAPIError("x", status_code=status))
+        == reason
+    )
+
+
+def test_api_error_reason_rate_limit():
+    assert (
+        meta_client.api_error_reason(MetaRateLimitError("slow")) == "rate_limit"
+    )
+
+
+def test_classify_success_sends_bounded_request(monkeypatch):
+    monkeypatch.setenv("META_API_KEY", FAKE_KEY)
+    seen = _capture(
+        monkeypatch,
+        _ok_payload(
+            json.dumps(
+                {
+                    "mode": "debug",
+                    "confidence": "high",
+                    "rationale": "A bug is described.",
+                    "question": None,
+                }
+            )
+        ),
+    )
+    result = meta_client.classify_objective(objective="the total is incorrect")
+    assert result == {
+        "selected_mode": "debug",
+        "rationale": "A bug is described.",
+        "confidence": "high",
+    }
+    assert seen["url"] == meta_client.API_URL
+    payload = json.loads(seen["data"].decode("utf-8"))
+    assert set(payload) == {
+        "model",
+        "messages",
+        "max_completion_tokens",
+        "reasoning_effort",
+    }
+    assert payload["max_completion_tokens"] == meta_client.MAX_CLASSIFY_TOKENS
+    assert "the total is incorrect" in payload["messages"][1]["content"]
+    assert FAKE_KEY not in json.dumps(payload)
+
+
+def test_classify_clarification(monkeypatch):
+    monkeypatch.setenv("META_API_KEY", FAKE_KEY)
+    _capture(
+        monkeypatch,
+        _ok_payload(
+            json.dumps(
+                {
+                    "mode": None,
+                    "confidence": "none",
+                    "rationale": "Too vague.",
+                    "question": "What failed?",
+                }
+            )
+        ),
+    )
+    result = meta_client.classify_objective(objective="look")
+    assert result["selected_mode"] is None
+    assert result["reason"] == "needs_clarification"
+    assert result["question"] == "What failed?"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"mode": "bogus", "confidence": "high", "rationale": "x", "question": None},
+        {"mode": "debug", "confidence": "bogus", "rationale": "x", "question": None},
+        {"mode": "debug", "confidence": "high", "rationale": "", "question": None},
+        {"mode": "debug", "confidence": "high", "question": None},
+        {"mode": None, "confidence": "high", "rationale": "x", "question": "q?"},
+        {"mode": None, "confidence": "none", "rationale": "x", "question": None},
+    ],
+)
+def test_classify_rejects_invalid_shapes(monkeypatch, bad):
+    monkeypatch.setenv("META_API_KEY", FAKE_KEY)
+    _capture(monkeypatch, _ok_payload(json.dumps(bad)))
+    with pytest.raises(MetaResponseError):
+        meta_client.classify_objective(objective="x")

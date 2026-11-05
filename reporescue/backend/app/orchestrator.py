@@ -87,10 +87,13 @@ def _investigate_with_meta() -> dict[str, Any]:
                     feedback=feedback,
                     api_key=api_key,
                 )
+            except meta_client.MetaRefusalError as exc:
+                return _meta_error(str(exc), "model_refused", baseline, attempts)
             except meta_client.MetaRateLimitError as exc:
                 return _meta_error(str(exc), "rate_limit", baseline, attempts)
             except meta_client.MetaAPIError as exc:
-                return _meta_error(str(exc), "api_error", baseline, attempts)
+                reason = meta_client.api_error_reason(exc)
+                return _meta_error(str(exc), reason, baseline, attempts)
             except meta_client.MetaResponseError as exc:
                 feedback = f"Previous model output was invalid and discarded: {exc}"
                 if attempt == MAX_LIVE_CALLS:

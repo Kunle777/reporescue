@@ -25,6 +25,7 @@ from app.meta_client import (
     MAX_EXPLAIN_MESSAGE_CHARS,
     MetaAPIError,
     MetaRateLimitError,
+    MetaRefusalError,
     MetaResponseError,
     assess_from_context,
     build_health_messages,
@@ -242,6 +243,8 @@ def test_health_message_is_optional_and_truncated(monkeypatch, tmp_path):
     [
         (MetaRateLimitError("slow down"), "rate_limit"),
         (MetaAPIError("bad gateway"), "api_error"),
+        (MetaAPIError("bad request", status_code=400), "api_rejected"),
+        (MetaRefusalError("refused"), "model_refused"),
         (MetaResponseError("empty"), "invalid_output"),
     ],
 )

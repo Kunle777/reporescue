@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
+import { useProfile } from "./auth/ProfileContext";
 import Login, { ResetPasswordForm } from "./components/Login";
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
@@ -11,8 +12,10 @@ import WorkbenchView from "./views/WorkbenchView";
 import { ApiError } from "./lib/api";
 import { getActiveJob } from "./lib/jobs";
 import { listProjects } from "./lib/projects";
+import { navigate, readRoute, subscribeToHash, type Route } from "./lib/router";
 import type { Project, View } from "./lib/types";
 import { isTerminalStatus } from "./lib/types";
+import fullLogo from "./assets/RepoRescue-Logos/RepoRescue-full-logo.png";
 
 export default function App() {
   const {
@@ -22,12 +25,32 @@ export default function App() {
     signOut,
     recoveryPending,
   } = useAuth();
-  const [view, setView] = useState<View>("dashboard");
+  const { username, refresh: refreshProfile } = useProfile();
+  // The address-bar hash is the navigation source of truth: views and the
+  // selected investigation survive refresh and honor back/forward buttons.
+  const [route, setRoute] = useState<Route>(() => readRoute());
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsError, setProjectsError] = useState("");
-  const [restoredJobId, setRestoredJobId] = useState<string | null>(null);
   const projectRequest = useRef(0);
+
+  const view: View = route.view;
+
+  useEffect(() => subscribeToHash(() => setRoute(readRoute())), []);
+
+  const goView = useCallback(
+    (next: View) => {
+      navigate({
+        view: next,
+        jobId: next === "workbench" ? readRoute().jobId : null,
+      });
+    },
+    []
+  );
+
+  const openInvestigation = useCallback((jobId: string) => {
+    navigate({ view: "workbench", jobId });
+  }, []);
 
   const loadProjects = useCallback(async () => {
     const requestId = ++projectRequest.current;
@@ -59,13 +82,11 @@ export default function App() {
     void loadProjects();
   }, [session, loadProjects]);
 
-  // Restore the backend-owned active investigation after refresh/restart.
-  // Read-only: restoring never creates a duplicate investigation.
+  // Restore the backend-owned active investigation after refresh/restart,
+  // unless the URL already selects an investigation. Read-only: restoring
+  // never creates a duplicate investigation.
   useEffect(() => {
-    if (!session) {
-      setRestoredJobId(null);
-      return;
-    }
+    if (!session || readRoute().jobId) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -76,8 +97,7 @@ export default function App() {
           detail.job &&
           !isTerminalStatus(detail.status)
         ) {
-          setRestoredJobId(detail.job.job_id);
-          setView("workbench");
+          navigate({ view: "workbench", jobId: detail.job.job_id }, true);
         }
       } catch (err) {
         if (!cancelled && err instanceof ApiError && err.status === 401) {
@@ -136,23 +156,20 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onNavigate={setView} />
+      <Sidebar view={view} onNavigate={goView} />
       <div className="main">
-        <Topbar view={view} email={user?.email ?? null} onSignOut={() => void signOut()} onStartInvestigation={() => setView("workbench")} />
+        <Topbar view={view} email={user?.email ?? null} username={username} onSignOut={() => void signOut()} onStartInvestigation={() => goView("workbench")} />
         <main className="content">
           {view === "dashboard" && (
             <DashboardView
-              userEmail={user?.email ?? null}
+              username={username}
               projects={projects}
               loading={projectsLoading}
               error={projectsError}
               onRetry={() => void loadProjects()}
-              onGoProjects={() => setView("projects")}
-              onGoWorkbench={() => setView("workbench")}
-              onOpenInvestigation={(id) => {
-                setRestoredJobId(id);
-                setView("workbench");
-              }}
+              onGoProjects={() => goView("projects")}
+              onGoWorkbench={() => goView("workbench")}
+              onOpenInvestigation={openInvestigation}
               onChanged={() => void loadProjects()}
               onUnauthorized={handleUnauthorized}
             />
@@ -173,14 +190,21 @@ export default function App() {
               session={session}
               projects={projects}
               projectsLoading={projectsLoading}
-              onNavigateProjects={() => setView("projects")}
+              onNavigateProjects={() => goView("projects")}
               onUnauthorized={handleUnauthorized}
-              restoredJobId={restoredJobId}
-              onJobAdopted={() => setRestoredJobId(null)}
+              selectedJobId={route.jobId}
+              onJobSelected={(jobId) =>
+                navigate({ view: "workbench", jobId })
+              }
             />
           </div>
           {view === "settings" && (
-            <SettingsView user={user} session={session} onSignOut={() => void signOut()} />
+            <SettingsView
+              user={user}
+              session={session}
+              onSignOut={() => void signOut()}
+              onProfileChanged={() => void refreshProfile()}
+            />
           )}
         </main>
         <footer className="app-footer">Made by K. T Labs</footer>
@@ -192,10 +216,7 @@ export default function App() {
 function AuthAside() {
   return (
     <aside className="auth-aside">
-      <div className="auth-aside-brand">
-        <span className="brand-mark"><ShieldCheck size={20} /></span>
-        <span>RepoRescue</span>
-      </div>
+      <img src={fullLogo} alt="RepoRescue — Investigate, Debug, Fix" className="auth-logo" />
       <div className="auth-aside-copy">
         <p className="eyebrow">REPOSITORY ENGINEERING</p>
         <h2>Investigate with evidence. Verify with execution.</h2>

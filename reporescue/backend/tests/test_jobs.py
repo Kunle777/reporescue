@@ -777,6 +777,53 @@ def test_create_job_route(db, owner, monkeypatch, project_dir):
     assert investigation.user_message == "go"
 
 
+def test_create_job_route_stores_general_preselect(db, owner, monkeypatch, project_dir):
+    record = _owned_ingestion(monkeypatch, project_dir, owner)
+    body = main_module.JobCreate(
+        ingestion_id=record["ingestion_id"], mode="general", message="look",
+        selected_mode="debug", routing_rationale="Model chose debug.",
+        routing_confidence="high", routing_source="model",
+    )
+    result = main_module.create_job_route(body, _user(owner), db)
+    investigation = db.get(Investigation, uuid.UUID(result["investigation_id"]))
+    assert investigation.preselected_mode == "debug"
+    assert investigation.preselect_rationale == "Model chose debug."
+    assert investigation.preselect_confidence == "high"
+    assert investigation.preselect_source == "model"
+    detail = main_module.get_job_route(
+        uuid.UUID(result["job_id"]), _user(owner), db
+    )
+    assert detail["preselected"]["mode"] == "debug"
+    assert detail["preselected"]["source"] == "model"
+
+
+def test_create_job_route_ignores_preselect_for_direct_modes(
+    db, owner, monkeypatch, project_dir
+):
+    record = _owned_ingestion(monkeypatch, project_dir, owner)
+    body = main_module.JobCreate(
+        ingestion_id=record["ingestion_id"], mode="debug", message="x",
+        selected_mode="explain",
+    )
+    result = main_module.create_job_route(body, _user(owner), db)
+    investigation = db.get(Investigation, uuid.UUID(result["investigation_id"]))
+    assert investigation.preselected_mode is None
+
+
+def test_record_run_persists_command(db, factory, owner):
+    from app.recorder import DBRecorder
+
+    investigation, job = _create(db, owner)
+    recorder = DBRecorder(
+        factory, investigation_id=investigation.id, job_id=job.id
+    )
+    recorder.record_run(
+        "baseline", {"backend": "docker", "command": "python -m pytest -q"}
+    )
+    detail = main_module.get_job_route(job.id, _user(owner), db)
+    assert detail["runs"][0]["command"] == "python -m pytest -q"
+
+
 def test_create_job_route_rejects_foreign_ingestion(db, owner, other_owner, monkeypatch, project_dir):
     record = _owned_ingestion(monkeypatch, project_dir, owner)
     body = main_module.JobCreate(ingestion_id=record["ingestion_id"])

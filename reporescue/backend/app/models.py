@@ -161,6 +161,10 @@ class Investigation(Base):
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
     selected_mode: Mapped[str | None] = mapped_column(String(20))
     routing: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    preselected_mode: Mapped[str | None] = mapped_column(String(20))
+    preselect_rationale: Mapped[str | None] = mapped_column(Text)
+    preselect_confidence: Mapped[str | None] = mapped_column(String(20))
+    preselect_source: Mapped[str | None] = mapped_column(String(40))
     user_message: Mapped[str | None] = mapped_column(String(2000))
     max_attempts: Mapped[int] = mapped_column(nullable=False, default=3)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
@@ -252,6 +256,7 @@ class ExecutionRun(Base):
         ForeignKey("investigation_attempts.id", ondelete="SET NULL"), index=True
     )
     kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    command: Mapped[str | None] = mapped_column(Text)
     backend: Mapped[str | None] = mapped_column(String(100))
     isolation: Mapped[str | None] = mapped_column(String(100))
     status: Mapped[str | None] = mapped_column(String(40))

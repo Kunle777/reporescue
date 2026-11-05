@@ -1,7 +1,12 @@
 import pytest
 
 from app import meta_client, orchestrator, repository
-from app.meta_client import MetaAPIError, MetaRateLimitError, MetaResponseError
+from app.meta_client import (
+    MetaAPIError,
+    MetaRateLimitError,
+    MetaRefusalError,
+    MetaResponseError,
+)
 from app.patch_guard import PatchProposal
 
 FAKE_KEY = "test-key-not-real"
@@ -78,6 +83,35 @@ def test_meta_api_error_returns_error_not_success(monkeypatch):
     assert "verdict" not in result
     assert result["baseline"]["passed"] is False
     _assert_fixture_original_untouched()
+
+
+def test_meta_rejected_request_is_not_transient(monkeypatch):
+    def fail(**kwargs):
+        raise MetaAPIError("Meta API request failed (HTTP 400).", status_code=400)
+
+    monkeypatch.setattr(meta_client, "diagnose_and_propose", fail)
+
+    result = orchestrator.investigate("negative-discount")
+
+    assert result["status"] == "error"
+    assert result["reason"] == "api_rejected"
+    assert "verdict" not in result
+
+
+def test_meta_refusal_fails_fast(monkeypatch):
+    calls = []
+
+    def refuse(**kwargs):
+        calls.append(True)
+        raise MetaRefusalError("Model refused the request.")
+
+    monkeypatch.setattr(meta_client, "diagnose_and_propose", refuse)
+
+    result = orchestrator.investigate("negative-discount")
+
+    assert result["status"] == "error"
+    assert result["reason"] == "model_refused"
+    assert calls == [True]
 
 
 def test_meta_rate_limit_is_reported(monkeypatch):

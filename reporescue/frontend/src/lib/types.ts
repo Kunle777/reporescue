@@ -143,6 +143,12 @@ export type InvestigationDetail = {
     confidence: string;
     signals: Record<string, string[]>;
   } | null;
+  preselected: {
+    mode: InvestigationMode | null;
+    rationale: string | null;
+    confidence: string | null;
+    source: string | null;
+  } | null;
   user_message: string | null;
   status: JobStatus;
   stage: string | null;
@@ -168,6 +174,7 @@ export type InvestigationDetail = {
   }[];
   runs: {
     kind: string;
+    command: string | null;
     backend: string | null;
     status: string | null;
     passed: boolean | null;

@@ -87,17 +87,29 @@ def create_investigation(
     user_message: str | None = None,
     max_attempts: int = 3,
     project_id: UUID | None = None,
+    preselected_mode: str | None = None,
+    preselect_rationale: str | None = None,
+    preselect_confidence: str | None = None,
+    preselect_source: str | None = None,
 ) -> tuple[Investigation, Job]:
     """Create a queued investigation plus its job, atomically.
 
     The initial user message is stored both as the immutable request
-    echo (``user_message``) and as the first conversation row.
+    echo (``user_message``) and as the first conversation row. The
+    pre-classified General route (from ``POST /api/general/classify``)
+    is stored when it names a genuine strategy mode; anything else is
+    dropped so the worker routes deterministically.
     """
     if mode not in ("debug", "explain", "health", "general"):
         raise InvalidMode(f"Unknown investigation mode {mode!r}.")
     message = (user_message or "").strip() or None
     if message is not None:
         message = message[:MAX_USER_MESSAGE_CHARS]
+    honored = (
+        preselected_mode
+        if preselected_mode in ("debug", "explain", "health")
+        else None
+    )
     investigation = Investigation(
         owner_id=owner_id,
         project_id=project_id,
@@ -108,6 +120,20 @@ def create_investigation(
         mode=mode,
         user_message=message,
         max_attempts=max(1, min(max_attempts, 3)),
+        preselected_mode=honored,
+        preselect_rationale=(
+            str(preselect_rationale)[:2000]
+            if honored and preselect_rationale
+            else None
+        ),
+        preselect_confidence=(
+            preselect_confidence
+            if honored and preselect_confidence in ("high", "medium", "low")
+            else None
+        ),
+        preselect_source=(
+            str(preselect_source)[:40] if honored and preselect_source else None
+        ),
     )
     db.add(investigation)
     db.flush()
@@ -591,6 +617,12 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         "mode": investigation.mode,
         "selected_mode": investigation.selected_mode,
         "routing": investigation.routing,
+        "preselected": {
+            "mode": investigation.preselected_mode,
+            "rationale": investigation.preselect_rationale,
+            "confidence": investigation.preselect_confidence,
+            "source": investigation.preselect_source,
+        },
         "user_message": investigation.user_message,
         "status": investigation.status,
         "stage": investigation.stage,
@@ -622,6 +654,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         "runs": [
             {
                 "kind": run.kind,
+                "command": run.command,
                 "backend": run.backend,
                 "isolation": run.isolation,
                 "status": run.status,

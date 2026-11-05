@@ -3,10 +3,10 @@ import {
   FolderGit2,
   LayoutDashboard,
   Settings as SettingsIcon,
-  ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 import type { View } from "../lib/types";
+import logoIcon from "../assets/RepoRescue-Logos/RepoRescue-icon.png";
 
 const ITEMS: { id: View; label: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -25,8 +25,8 @@ export default function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark">
-          <ShieldCheck size={20} />
+        <span className="brand-mark brand-logo">
+          <img src={logoIcon} alt="RepoRescue logo" width={36} height={36} />
         </span>
         <span className="brand-lockup">
           <span className="brand-name">RepoRescue</span>

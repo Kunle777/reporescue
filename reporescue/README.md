@@ -23,7 +23,7 @@ RepoRescue provides four investigation modes:
 | **Explain** | Explains repository structure and source code using inspected repository context. |
 | **Health** | Assesses repository health using deterministic checks and AI-assisted interpretation. |
 
-General is the default workbench experience. It uses transparent, deterministic signals to select Debug, Explain, or Health rather than pretending that an AI classification call has been made.
+General is the default workbench experience. It classifies the objective before anything is queued: transparent deterministic signals first, with a model classification consulted only for objectives that are not already high-confidence. A vague objective returns a follow-up question instead of launching an investigation that cannot answer it.
 
 ## How it works
 
@@ -124,9 +124,9 @@ It routes the request to:
 - **Explain** when the objective asks for understanding or explanation.
 - **Health** when the objective concerns repository quality or general assessment.
 
-An empty objective requires clarification. When no recognized signals are found, General falls back to a low-confidence Health assessment.
+An empty or vague objective requires clarification: the workbench shows a follow-up question, preserves the repository selection, and queues nothing until the objective is actionable. A sufficiently clear objective is routed with its rationale shown in the interface.
 
-Routing is deterministic, not an AI classification call. The selected mode and routing explanation are persisted with the investigation.
+Routing is deterministic-first with model assistance for unclear cases. The selected mode and routing explanation are persisted with the investigation.
 
 ### 2. Debug — investigate and verify
 
@@ -279,10 +279,12 @@ The primary investigation workflow is asynchronous:
 | `GET /api/jobs/{job_id}` | Retrieve job progress and results. |
 | `GET /api/jobs/active` | Restore an active job after refresh. |
 | `POST /api/jobs/{job_id}/cancel` | Request job cancellation. |
+| `POST /api/general/classify` | Classify a General objective (or ask for clarification) without creating a job. |
+| `GET /api/investigations/{id}/patch` | Download the guarded unified diff for an investigation. |
 | `/api/projects` | Manage projects. |
 | `GET /api/health` | Check API process liveness. |
 
-The API also retains the synchronous `POST /api/investigations` endpoint and the fixture-only `POST /api/demo/investigate` endpoint.
+The API also retains the synchronous `POST /api/investigations` endpoint and the fixture-only `POST /api/demo/investigate` endpoint (authenticated, since it spends API quota in meta mode).
 
 Interactive API documentation is available at `/docs` when the API is running.
 
@@ -540,7 +542,7 @@ Current limitations:
 - JavaScript detection and Modal execution components exist, but JavaScript is not yet wired into the complete investigation pipeline.
 - Other languages do not currently have runnable investigation support.
 - Explain and Health are static assessments; they do not execute repository code.
-- General routing is signal-based and may require a clearer objective. Its fallback is explicitly low-confidence.
+- General routing is deterministic-first with model assistance; vague objectives ask a clarifying question instead of launching.
 - The conversation records are persisted, but a follow-up conversation API or agent is not yet implemented.
 - One worker process is the supported deployment topology until higher-concurrency production operation has been load-tested.
 - Docker end-to-end execution is not part of the hosted Modal execution path.
@@ -555,7 +557,9 @@ The legacy fixture endpoint, `POST /api/demo/investigate`, uses `REPORESCUE_AI_M
 
 The current queued investigation pipeline calls the Meta client directly for Debug diagnosis and Explain/Health summaries. A valid `META_API_KEY` is required for those live AI-backed operations.
 
-Setting `REPORESCUE_AI_MODE=meta` opts the legacy fixture endpoint into live Meta calls; it is not required for the queued investigation pipeline.
+Setting `REPORESCUE_AI_MODE=meta` opts the legacy fixture endpoint into live Meta calls; it is not required for the queued investigation pipeline. General pre-queue classification likewise consults the model only in meta AI mode, with the deterministic result as the fallback.
+
+Model responses are parsed defensively: string and content-block shapes are accepted, refusals and content-filter terminations fail fast as `model_refused`, and permanently rejected requests fail fast as `api_rejected` (only rate limits and server-side errors are retried).
 
 ---
 

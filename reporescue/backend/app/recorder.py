@@ -30,6 +30,15 @@ from .models import (
 MAX_DIAGNOSIS_CHARS = 4_000
 MAX_DETAIL_CHARS = 8_000
 MAX_TITLE_CHARS = 500
+MAX_COMMAND_CHARS = 2_000
+
+
+def _clip_command(command: Any) -> str | None:
+    """Bound a recorded execution command; None when absent."""
+    if command is None:
+        return None
+    text = str(command)
+    return text if len(text) <= MAX_COMMAND_CHARS else text[:MAX_COMMAND_CHARS]
 
 class JobCancelled(Exception):
     """The job was cancelled (or the worker is stopping): abort promptly."""
@@ -190,6 +199,7 @@ class DBRecorder:
                 investigation_id=self._investigation_id,
                 attempt_id=attempt_id,
                 kind=kind,
+                command=_clip_command(result.get("command")),
                 backend=result.get("backend"),
                 isolation=result.get("isolation"),
                 status=result.get("status"),

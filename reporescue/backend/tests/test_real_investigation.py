@@ -240,6 +240,9 @@ def test_static_path_maps_meta_errors(tmp_path, monkeypatch):
     cases = [
         (meta_client.MetaRateLimitError("slow"), "rate_limit"),
         (meta_client.MetaAPIError("down"), "api_error"),
+        (meta_client.MetaAPIError("boom", status_code=500), "api_error"),
+        (meta_client.MetaAPIError("bad request", status_code=400), "api_rejected"),
+        (meta_client.MetaRefusalError("refused"), "model_refused"),
         (meta_client.MetaResponseError("bad"), "invalid_output"),
     ]
     for error, reason in cases:
@@ -520,6 +523,45 @@ def test_api_error_returns_error_not_success(project_dir, monkeypatch, materiali
 
     assert result["status"] == "error"
     assert result["reason"] == "api_error"
+    assert "verdict" not in result
+
+
+def test_rejected_request_fails_fast_without_transient_reason(
+    project_dir, monkeypatch, materialized
+):
+    record = _ingest_copy(monkeypatch, project_dir)
+    backend = FakeBackend([_baseline_failure()])
+
+    def fail(**kwargs):
+        raise meta_client.MetaAPIError("bad request", status_code=400)
+
+    result = pipeline.investigate_repository(
+        record["ingestion_id"], backend=backend, diagnose=fail
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "api_rejected"
+    assert "verdict" not in result
+
+
+def test_model_refusal_fails_fast_without_retry(
+    project_dir, monkeypatch, materialized
+):
+    record = _ingest_copy(monkeypatch, project_dir)
+    backend = FakeBackend([_baseline_failure()])
+    calls = []
+
+    def refuse(**kwargs):
+        calls.append(True)
+        raise meta_client.MetaRefusalError("Model refused the request.")
+
+    result = pipeline.investigate_repository(
+        record["ingestion_id"], backend=backend, diagnose=refuse, max_attempts=3
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "model_refused"
+    assert calls == [True]
     assert "verdict" not in result
 
 

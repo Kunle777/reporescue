@@ -7,6 +7,11 @@ export type CreateJobInput = {
   message?: string;
   max_attempts?: number;
   project_id?: string;
+  /** Pre-classified General route (from classifyObjective). */
+  selected_mode?: ApiInvestigationMode;
+  routing_rationale?: string;
+  routing_confidence?: string;
+  routing_source?: string;
 };
 
 export type CreatedJob = {
@@ -26,6 +31,14 @@ export async function createJob(input: CreateJobInput): Promise<CreatedJob> {
       message: input.message?.trim() ? input.message.trim() : null,
       max_attempts: input.max_attempts ?? 3,
       ...(input.project_id ? { project_id: input.project_id } : {}),
+      ...(input.selected_mode ? { selected_mode: input.selected_mode } : {}),
+      ...(input.routing_rationale
+        ? { routing_rationale: input.routing_rationale }
+        : {}),
+      ...(input.routing_confidence
+        ? { routing_confidence: input.routing_confidence }
+        : {}),
+      ...(input.routing_source ? { routing_source: input.routing_source } : {}),
     }),
   });
 }

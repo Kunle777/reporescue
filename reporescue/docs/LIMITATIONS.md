@@ -83,22 +83,25 @@ original entry is preserved with its actual status.
 - **Acceptance test:** existing attempt/guard tests; `tests/test_jobs.py`
   worker E2E asserts recorded attempts/runs.
 
-### L6 — Container hardening still outstanding
+### L6 — Container hardening is partial (updated)
 - **Subsystem:** execution (Docker backend)
-- **Impact:** No non-root user, read-only rootfs, tmpfs mounts, disk
-  quotas, digest pinning, or host-crash reaper. Isolation is Docker
-  defaults plus timeouts, cleanup, and secret scrubbing (Docker path;
-  the Modal path below differs).
+- **Impact:** The Docker path now runs with `--cpus`, `--memory`,
+  `--pids-limit`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
+  a tmpfs `/tmp`, `--network none` for test runs, and forced container
+  removal with timeouts (see container arguments in
+  `backend/app/execution.py`). Still outstanding on the Docker path: a
+  non-root user, read-only rootfs, disk quotas, digest pinning, and a
+  host-crash reaper. Do not treat Docker execution as a full sandbox
+  boundary on its own.
 - **Evidence:** container arguments in `backend/app/execution.py`.
-- **Resolution:** Deferred to the security-hardening phase; each flag needs
-  reliability testing against venv/pip/test workloads first.
-  Modal path (Phase 5B): provider-isolated sandboxes with CPU/memory
-  limits, network-blocked test runs, networked installs only at image
-  build, secret isolation (fixed safe env; tokens never forwarded),
-  bounded lifetimes, mid-run cancellation via termination, and
-  finally-block cleanup. Process-count limits rely on Modal runtime
-  defaults (the SDK exposes no pids-limit). Docker-path items above
-  remain outstanding.
+- **Resolution:** Modal path (Phase 5B): provider-isolated sandboxes with
+  CPU/memory limits, network-blocked test runs, networked installs
+  only at image build, secret isolation (fixed safe env; tokens never
+  forwarded), bounded lifetimes, mid-run cancellation via termination,
+  and finally-block cleanup. Process-count limits rely on Modal
+  runtime defaults (the SDK exposes no pids-limit). The hosted
+  deployment should use `REPORESCUE_EXECUTION_BACKEND=modal`; never
+  use `unsafe-local` for untrusted repositories.
 - **Acceptance test:** existing Docker cleanup/timeout tests (12/12 when
   Docker runs). Modal: `tests/test_modal_backend.py` (mocked
   isolation/transfer) plus `verify_modal_phase5b.py` (real cloud).
@@ -221,3 +224,49 @@ original entry is preserved with its actual status.
   (`test_clone_checkout_commands_enable_windows_longpaths`),
   `tests/test_repo_context.py` (expo parametrize cases),
   `tests/test_snapshot.py`, `tests/test_patchset_guard.py`.
+
+### L15 — Rate limiting is per process
+- **Subsystem:** `backend/app/rate_limit.py`, expensive POST routes
+- **Impact:** ingest/job/classify/demo budgets are enforced from
+  in-process memory, so a multi-worker API deploy enforces per-process
+  budgets rather than one exact global budget. Normal use never
+  approaches the limits (20–60 calls/minute per bucket); the bound
+  still caps total load by worker count.
+- **Evidence:** `LIMITS` and bucket store in `backend/app/rate_limit.py`.
+- **Resolution:** Accepted for the current topology. A shared store
+  (Redis) would be needed for exact global limits.
+- **Acceptance test:** `tests/test_rate_limit.py`.
+
+### L16 — Migration chain requires PostgreSQL
+- **Subsystem:** `backend/alembic/versions/0002_*` onward
+- **Impact:** revisions after 0001 use constraint operations that
+  SQLite cannot execute, so `alembic upgrade head` only runs against
+  PostgreSQL (the production target). Tests build schema from
+  SQLAlchemy metadata instead and are unaffected.
+- **Evidence:** `NotImplementedError: No support for ALTER of
+  constraints in SQLite dialect` when upgrading a scratch SQLite DB.
+- **Resolution:** By design; migrations target Supabase PostgreSQL.
+  Revision 0007 (pre-classification columns, run commands) was
+  validated in both directions against SQLite batch mode in isolation.
+- **Acceptance test:** `alembic upgrade head` on PostgreSQL; suite
+  schema parity via `Base.metadata.create_all`.
+
+### L17 — Meta API live verification (2026-11-05)
+- **Subsystem:** `backend/app/meta_client.py`
+- **Impact:** None outstanding. The configured endpoint
+  (`https://api.meta.ai/v1/chat/completions`) and model
+  (`muse-spark-1.3`) were verified live with the project key: the
+  request shape (`model` + `messages` + `max_completion_tokens` +
+  `reasoning_effort`) is accepted and the response shape
+  (`choices[0].message.content`, `finish_reason`,
+  `message.refusal`) matches the parser. Repair payloads use a 2000
+  token budget (aligned with the ~8000-char patch guard); prose
+  answers stay at 800.
+- **Evidence:** `backend/test_meta_connection.py` probe output.
+- **Resolution:** Verified; no action. The earlier `invalid_output`
+  failures were most plausibly empty/truncated responses under the
+  old 800-token repair budget; truncation now surfaces a specific
+  actionable message.
+- **Acceptance test:** `tests/test_meta_client.py` response-shape
+  fixtures (string, content blocks, refusal, filter, truncation,
+  error envelope).

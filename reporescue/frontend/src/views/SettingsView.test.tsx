@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { User } from "@supabase/supabase-js";
 import SettingsView from "./SettingsView";
+import { ThemeProvider } from "../theme/ThemeContext";
 import { ApiError } from "../lib/api";
 
 const mockProfileApi = vi.hoisted(() => ({
@@ -68,11 +69,13 @@ describe("SettingsView username", () => {
     mockProfileApi.getProfile.mockResolvedValue(profile({ username: "ada_debugs" }));
     mockProfileApi.updateUsername.mockResolvedValue(profile({ username: "ada_builds" }));
     render(
-      <SettingsView
-        user={userWith(["email"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     const input = (await screen.findByLabelText(
@@ -92,11 +95,13 @@ describe("SettingsView username", () => {
       new ApiError(409, "Username is already taken.")
     );
     render(
-      <SettingsView
-        user={userWith(["email"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     const input = await screen.findByLabelText("Pick a username");
@@ -110,11 +115,13 @@ describe("SettingsView username", () => {
   it("validates before calling the API", async () => {
     mockProfileApi.getProfile.mockResolvedValue(profile());
     render(
-      <SettingsView
-        user={userWith(["email"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     const input = await screen.findByLabelText("Pick a username");
@@ -133,11 +140,13 @@ describe("SettingsView GitHub", () => {
       profile({ username: "ada_debugs", ...GITHUB })
     );
     render(
-      <SettingsView
-        user={userWith(["email", "github"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email", "github"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     // Rendered twice: Account row plus the GitHub card.
@@ -156,11 +165,13 @@ describe("SettingsView GitHub", () => {
     mockProfileApi.getProfile.mockResolvedValue(profile());
     mockAuth.linkGitHubIdentity.mockResolvedValue({ error: null });
     render(
-      <SettingsView
-        user={userWith(["email"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     fireEvent.click(
@@ -175,11 +186,13 @@ describe("SettingsView GitHub", () => {
       error: "OAuth provider is not enabled",
     });
     render(
-      <SettingsView
-        user={userWith(["email"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     fireEvent.click(
@@ -199,11 +212,13 @@ describe("SettingsView GitHub", () => {
     );
     mockAuth.unlinkGitHubIdentity.mockResolvedValue({ error: null });
     render(
-      <SettingsView
-        user={userWith(["email", "github"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email", "github"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     fireEvent.click(
@@ -220,11 +235,13 @@ describe("SettingsView GitHub", () => {
   it("hides disconnect for GitHub-only sign-in", async () => {
     mockProfileApi.getProfile.mockResolvedValue(profile({ ...GITHUB }));
     render(
-      <SettingsView
-        user={userWith(["github"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["github"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     expect(await screen.findAllByText("@Kunle777")).toHaveLength(2);
@@ -242,11 +259,13 @@ describe("SettingsView GitHub", () => {
     mockAuth.githubSyncConflict =
       "@Kunle777 is already connected to this profile.";
     render(
-      <SettingsView
-        user={userWith(["email", "github"])}
-        session={null}
-        onSignOut={() => {}}
-      />
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email", "github"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
     );
 
     expect(
@@ -258,5 +277,49 @@ describe("SettingsView GitHub", () => {
     expect(mockProfileApi.syncGithubIdentity).toHaveBeenCalledWith(true);
     expect(await screen.findByText("GitHub account replaced.")).toBeDefined();
     expect(mockAuth.clearGithubSyncConflict).toHaveBeenCalled();
+  });
+});
+
+describe("SettingsView theme", () => {
+  it("switches the persisted theme from settings", async () => {
+    window.localStorage.clear();
+    mockProfileApi.getProfile.mockResolvedValue(profile());
+    render(
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+        />
+      </ThemeProvider>
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: /Dark/ }));
+    expect(window.localStorage.getItem("reporescue-theme")).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    window.localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+  });
+
+  it("notifies the app after a username save", async () => {
+    mockProfileApi.getProfile.mockResolvedValue(profile({ username: "ada_debugs" }));
+    mockProfileApi.updateUsername.mockResolvedValue(profile({ username: "ada_builds" }));
+    const onProfileChanged = vi.fn();
+    render(
+      <ThemeProvider>
+        <SettingsView
+          user={userWith(["email"])}
+          session={null}
+          onSignOut={() => {}}
+          onProfileChanged={onProfileChanged}
+        />
+      </ThemeProvider>
+    );
+    const input = (await screen.findByLabelText(
+      "Your username"
+    )) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "ada_builds" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save username" }));
+    expect(await screen.findByText("Saved")).toBeDefined();
+    expect(onProfileChanged).toHaveBeenCalledTimes(1);
   });
 });

@@ -237,39 +237,28 @@ def test_route_auth_wiring():
     from app import main as main_module
     from app.auth import get_current_user
 
-    paths = {}
-    for route in main_module.app.routes:
-        paths[(route.path, tuple(route.methods or ()))] = route
-    protected = [
-        ("/api/repos/ingest", ("POST",)),
-        ("/api/repos/{ingestion_id}", ("GET",)),
-        ("/api/investigations", ("POST",)),
-        ("/api/projects", ("POST",)),
-        ("/api/projects", ("GET",)),
-        ("/api/projects/{project_id}", ("GET",)),
-        ("/api/projects/{project_id}", ("PATCH",)),
-        ("/api/projects/{project_id}", ("DELETE",)),
-        ("/api/profile", ("GET",)),
-        ("/api/profile", ("PATCH",)),
-        ("/api/profile/github", ("POST",)),
-        ("/api/profile/github", ("DELETE",)),
-    ]
-    public = [
-        ("/api/health", ("GET",)),
-        ("/api/demo/investigate", ("POST",)),
-    ]
-    for key in protected:
-        dependant = paths[key].dependant
-        assert any(
+    def uses_auth(route) -> bool:
+        return any(
             dependency.call is get_current_user
-            for dependency in dependant.dependencies
-        ), key
-    for key in public:
-        dependant = paths[key].dependant
-        assert not any(
-            dependency.call is get_current_user
-            for dependency in dependant.dependencies
-        ), key
+            for dependency in route.dependant.dependencies
+        )
+
+    api_routes = [
+        route
+        for route in main_module.app.routes
+        if getattr(route, "path", "").startswith("/api")
+    ]
+    assert api_routes, "expected registered /api routes"
+    checked = 0
+    for route in api_routes:
+        key = (route.path, tuple(route.methods or ()))
+        if route.path == "/api/health":
+            assert not uses_auth(route), key
+        else:
+            assert uses_auth(route), key
+            checked += 1
+    # Guard against the test silently covering nothing if routes move.
+    assert checked >= 15, checked
 
 
 def test_health_endpoint_reports_liveness_without_demo_mode():

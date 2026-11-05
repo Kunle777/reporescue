@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from . import config
 from .db import get_session_factory
+from .execution import traceback_locations
 from .ingestion import clear_ingestions
 from .jobqueue import (
     DEFAULT_BACKOFF_BASE_SECONDS,
@@ -145,14 +146,24 @@ def _finalize_success(
     if mode == "debug":
         baseline = report.get("baseline", {}) or {}
         for failure in (baseline.get("failures", []) or [])[:MAX_FINDINGS_PER_RUN]:
+            traceback_text = str(failure.get("traceback", "") or "")
+            locations = [
+                {"file": path, "line": lineno}
+                for path, lineno in traceback_locations(traceback_text)
+            ][:10]
             recorder.record_finding(
                 kind="fact",
                 category="test_failure",
                 title=str(failure.get("test", "baseline failure"))[:500],
                 detail=(
                     f"{failure.get('message', '')}\n"
-                    f"{failure.get('traceback', '')}".strip() or None
+                    f"{traceback_text}".strip() or None
                 ),
+                evidence={
+                    "test": failure.get("test"),
+                    "kind": failure.get("kind"),
+                    "locations": locations,
+                },
                 confidence="confirmed",
             )
         if report.get("diagnosis"):
@@ -183,6 +194,10 @@ def _finalize_success(
                 category="health_check",
                 title=f"[{str(check.get('status', '?')).upper()}] {check.get('name', '?')}",
                 detail=check.get("detail"),
+                evidence={
+                    "check": check.get("name"),
+                    "status": check.get("status"),
+                },
                 confidence="confirmed",
             )
     summary = str(report.get("summary", "")).strip()
@@ -240,6 +255,10 @@ def run_job(
         commit_sha = investigation.commit_sha
         max_attempts = investigation.max_attempts
         user_message = investigation.user_message
+        preselected_mode = investigation.preselected_mode
+        preselect_rationale = investigation.preselect_rationale
+        preselect_confidence = investigation.preselect_confidence
+        preselect_source = investigation.preselect_source
 
     recorder = DBRecorder(
         session_factory,
@@ -269,6 +288,10 @@ def run_job(
                 message=user_message,
                 max_attempts=max_attempts,
                 on_phase=_ingest_phase,
+                preselected_mode=preselected_mode,
+                preselect_rationale=preselect_rationale,
+                preselect_confidence=preselect_confidence,
+                preselect_source=preselect_source,
             )
         except ContextError as exc:
             with session_factory() as db:

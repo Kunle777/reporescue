@@ -26,10 +26,33 @@ from app.meta_client import (
     MAX_EXPLAIN_MESSAGE_CHARS,
     MetaAPIError,
     MetaRateLimitError,
+    MetaRefusalError,
     MetaResponseError,
     build_explain_messages,
     explain_from_context,
 )
+
+
+def test_explain_prompt_requests_structured_sections():
+    system = build_explain_messages(
+        profile_summary="profile",
+        structure="lists",
+        excerpts={},
+        user_message="how does auth work?",
+    )[0]["content"]
+    for section in (
+        "Overview",
+        "How it works",
+        "Important files",
+        "How the components connect",
+        "How to use it",
+        "Security considerations",
+        "Next steps",
+    ):
+        assert section in system
+    assert "Omit sections that do not apply" in system
+    assert "no JSON" in system
+    assert "not executed or verified" in system
 
 FAKE_SHA = "c" * 40
 EXPLANATION = "This repo adds numbers."
@@ -195,6 +218,8 @@ def test_explain_missing_record_is_not_found():
     [
         (MetaRateLimitError("slow down"), "rate_limit"),
         (MetaAPIError("bad gateway"), "api_error"),
+        (MetaAPIError("bad request", status_code=400), "api_rejected"),
+        (MetaRefusalError("refused"), "model_refused"),
         (MetaResponseError("empty"), "invalid_output"),
     ],
 )

@@ -486,6 +486,7 @@ def stage_debug_baseline(
     if baseline_result.status == "cancelled":
         raise JobCancelled("Baseline execution was cancelled.")
     baseline = baseline_result.to_dict()
+    baseline["command"] = " ".join(request.test_command)
     progress.record_run("baseline", baseline)
     progress.record_partial(
         {
@@ -621,6 +622,14 @@ def stage_debug_repair(
                 baseline_tail=base["output"],
                 feedback=feedback,
             )
+        except meta_client.MetaRefusalError as exc:
+            return _failed_result(
+                "repair",
+                _error(
+                    str(exc), "model_refused", profile,
+                    execution=execution_info, baseline=baseline, attempts=attempts,
+                ),
+            )
         except meta_client.MetaRateLimitError as exc:
             return _failed_result(
                 "repair",
@@ -633,7 +642,7 @@ def stage_debug_repair(
             return _failed_result(
                 "repair",
                 _error(
-                    str(exc), "api_error", profile,
+                    str(exc), meta_client.api_error_reason(exc), profile,
                     execution=execution_info, baseline=baseline, attempts=attempts,
                 ),
             )
@@ -709,6 +718,7 @@ def stage_debug_repair(
         if verification_result.status == "cancelled":
             raise JobCancelled("Patch verification was cancelled.")
         verification = verification_result.to_dict()
+        verification["command"] = " ".join(verify_request.test_command)
         last_diagnosis, last_patch, last_verification = diagnosis, patchset, verification
         attempt_id = progress.record_attempt(
             attempt,
@@ -865,10 +875,13 @@ def stage_static_diagnose(
             evidence_files=evidence,
             user_message=user_message,
         )
+    except meta_client.MetaRefusalError as exc:
+        return _failed_result("diagnose", _error(str(exc), "model_refused", profile))
     except meta_client.MetaRateLimitError as exc:
         return _failed_result("diagnose", _error(str(exc), "rate_limit", profile))
     except meta_client.MetaAPIError as exc:
-        return _failed_result("diagnose", _error(str(exc), "api_error", profile))
+        reason = meta_client.api_error_reason(exc)
+        return _failed_result("diagnose", _error(str(exc), reason, profile))
     except meta_client.MetaResponseError as exc:
         return _failed_result("diagnose", _error(str(exc), "invalid_output", profile))
 

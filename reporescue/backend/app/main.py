@@ -6,14 +6,17 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.orm import Session
 
 from . import config
+from . import meta_client as meta_client_module
 from . import projects as projects_module
 from .auth import AuthenticatedUser, get_current_user
 from .db import get_db
+from .general import route_objective
 from .github_ingest import IngestionError
+from .rate_limit import check_rate_limit
 from .ingestion import (
     get_ingestion,
     get_ingestion_owner,
@@ -79,7 +82,11 @@ class RealInvestigationRequest(BaseModel):
     ingestion_id: str
     max_attempts: int = 3
     mode: Literal["debug", "explain", "health", "general"] = "debug"
-    message: str | None = None
+    message: str | None = Field(default=None, max_length=8000)
+    selected_mode: Literal["debug", "explain", "health"] | None = None
+    routing_rationale: str | None = Field(default=None, max_length=2000)
+    routing_confidence: Literal["high", "medium", "low"] | None = None
+    routing_source: str | None = Field(default=None, max_length=40)
 
 
 DisplayName = Annotated[
@@ -138,12 +145,20 @@ class GitHubSyncRequest(BaseModel):
     confirm: bool = False
 
 
+class ClassifyRequest(BaseModel):
+    message: str = Field(max_length=8000)
+
+
 class JobCreate(BaseModel):
     ingestion_id: str
     mode: Literal["debug", "explain", "health", "general"] = "debug"
-    message: str | None = None
+    message: str | None = Field(default=None, max_length=8000)
     max_attempts: int = 3
     project_id: UUID | None = None
+    selected_mode: Literal["debug", "explain", "health"] | None = None
+    routing_rationale: str | None = Field(default=None, max_length=2000)
+    routing_confidence: Literal["high", "medium", "low"] | None = None
+    routing_source: str | None = Field(default=None, max_length=40)
 
 
 def _require_ingestion_owner(ingestion_id: str, user: AuthenticatedUser) -> None:
@@ -186,8 +201,82 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/demo/investigate")
-def investigate(request: InvestigationRequest) -> dict[str, Any]:
+def investigate(
+    request: InvestigationRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Fixture-only demo investigation. Authenticated: in meta AI mode
+    this endpoint spends API quota, so anonymous callers are rejected."""
+    check_rate_limit("demo", user)
     return run_investigation(request.scenario)
+
+
+def _try_model_classification(text: str) -> dict[str, Any] | None:
+    """Route one objective with the model; None when unavailable/failing.
+
+    Model classification runs only in meta AI mode with a configured
+    key, and only for objectives the deterministic router did not
+    already resolve with high confidence. Any model failure (config,
+    transport, refusal, invalid output) yields None so the caller
+    falls back to the deterministic result.
+    """
+    if not text:
+        return None
+    try:
+        if meta_client_module.get_ai_mode() != "meta":
+            return None
+        api_key = meta_client_module.get_api_key()
+    except meta_client_module.MetaConfigError:
+        return None
+    try:
+        return meta_client_module.classify_objective(
+            objective=text, api_key=api_key
+        )
+    except meta_client_module.MetaClientError:
+        return None
+
+
+@app.post("/api/general/classify")
+def classify_general_route(
+    body: ClassifyRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Classify a General objective without creating a job.
+
+    Deterministic keyword routing first; the model is consulted only
+    for objectives that are not already high-confidence, with the
+    deterministic outcome as the fallback. A vague objective returns
+    ``needs_clarification`` with a follow-up question instead of a
+    route: the frontend shows the question and lets the user refine
+    the objective before anything is queued.
+    """
+    check_rate_limit("classify", user)
+    text = (body.message or "").strip()
+    deterministic = route_objective(text)
+    signals = deterministic.get("signals", {})
+    if deterministic.get("selected_mode") and deterministic.get("confidence") == "high":
+        return {**deterministic, "source": "deterministic"}
+    model = _try_model_classification(text)
+    if model is not None and model.get("selected_mode"):
+        return {
+            "selected_mode": model["selected_mode"],
+            "rationale": model["rationale"],
+            "confidence": model["confidence"],
+            "signals": signals,
+            "source": "model",
+        }
+    if model is not None:
+        return {
+            "selected_mode": None,
+            "reason": "needs_clarification",
+            "question": model["question"],
+            "rationale": model["rationale"],
+            "confidence": "none",
+            "signals": signals,
+            "suggested_mode": deterministic.get("suggested_mode"),
+            "source": "model",
+        }
+    return {**deterministic, "source": "deterministic"}
 
 
 @app.post("/api/repos/ingest")
@@ -196,6 +285,7 @@ def ingest_repo(
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    check_rate_limit("ingest", user)
     record = ingest_repository(request.url, request.ref)
     if record.get("status") == "complete" and record.get("ingestion_id"):
         set_ingestion_owner(record["ingestion_id"], str(user.id))
@@ -240,6 +330,10 @@ def start_real_investigation(
             mode=request.mode,
             message=request.message,
             max_attempts=max(1, min(request.max_attempts, 3)),
+            preselected_mode=request.selected_mode,
+            preselect_rationale=request.routing_rationale,
+            preselect_confidence=request.routing_confidence,
+            preselect_source=request.routing_source,
         )
     except ContextError as exc:
         if exc.reason == "not_owner":
@@ -328,6 +422,7 @@ def create_job_route(
     the worker re-ingests from the pinned SHA, so execution never depends
     on the API process's in-memory store.
     """
+    check_rate_limit("jobs", user)
     record = _resolve_record(body.ingestion_id, user, db)
     if record.get("status") != "complete":
         raise HTTPException(
@@ -344,6 +439,7 @@ def create_job_route(
         db, user_id=user.id, username=username_attempt_from_claims(user.claims)
     )
     profile = record["profile"]
+    preselect = body.mode == "general"
     try:
         investigation, job = jobqueue_module.create_investigation(
             db,
@@ -356,6 +452,10 @@ def create_job_route(
             user_message=body.message,
             max_attempts=body.max_attempts,
             project_id=body.project_id,
+            preselected_mode=body.selected_mode if preselect else None,
+            preselect_rationale=body.routing_rationale if preselect else None,
+            preselect_confidence=body.routing_confidence if preselect else None,
+            preselect_source=body.routing_source if preselect else None,
         )
     except InvalidMode as exc:
         raise HTTPException(status_code=422, detail=str(exc))

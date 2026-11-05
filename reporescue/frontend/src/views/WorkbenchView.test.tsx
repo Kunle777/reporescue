@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Session } from "@supabase/supabase-js";
 import { ApiError } from "../lib/api";
 import WorkbenchView from "./WorkbenchView";
@@ -20,6 +20,9 @@ vi.mock("../lib/api", async (importOriginal) => {
   return { ...original, apiJson: mockApi.apiJson };
 });
 
+const mockGeneral = vi.hoisted(() => ({ classifyObjective: vi.fn() }));
+vi.mock("../lib/general", () => mockGeneral);
+
 const mockPatches = vi.hoisted(() => ({ downloadInvestigationPatch: vi.fn() }));
 vi.mock("../lib/patches", () => mockPatches);
 
@@ -35,6 +38,7 @@ function detail(overrides: Record<string, unknown> = {}) {
     mode: "debug",
     selected_mode: null,
     routing: null,
+    preselected: null,
     user_message: null,
     status: "running",
     stage: "baseline",
@@ -85,24 +89,68 @@ beforeEach(() => {
 });
 
 describe("WorkbenchView job restoration", () => {
-  it("loads nothing without a restored job id", () => {
+  it("loads nothing without a selected job id", () => {
     render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
     expect(mockJobs.getJob).not.toHaveBeenCalled();
     expect(mockJobs.createJob).not.toHaveBeenCalled();
   });
 
-  it("restores the backend-owned job once without creating a duplicate", async () => {
-    const onAdopted = vi.fn();
+  it("loads the route-selected job once without creating a duplicate", async () => {
     mockJobs.getJob.mockResolvedValueOnce(detail());
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" onJobAdopted={onAdopted} />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" onJobSelected={() => {}} />
     );
     expect(await screen.findByText("acme/calc")).toBeDefined();
     expect(screen.getAllByText(/RUNNING/).length).toBeGreaterThan(0);
     expect(mockJobs.getJob).toHaveBeenCalledTimes(1);
     expect(mockJobs.getJob).toHaveBeenCalledWith("j1");
     expect(mockJobs.createJob).not.toHaveBeenCalled();
-    expect(onAdopted).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports saved-work selection to the route instead of fetching inline", async () => {
+    mockJobs.listJobs.mockResolvedValue([
+      { job_id: "j5", investigation_id: "i5", status: "completed", attempts: 1, max_attempts: 3, error: null, created_at: null, updated_at: null, repo_name: "acme/calc", mode: "debug", progress_pct: 100 },
+    ]);
+    const onJobSelected = vi.fn();
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId={null} onJobSelected={onJobSelected} />
+    );
+    fireEvent.click(await screen.findByText("acme/calc"));
+    expect(onJobSelected).toHaveBeenCalledWith("j5");
+    expect(mockJobs.getJob).not.toHaveBeenCalled();
+  });
+
+  it("drops a stale response when selection changes mid-flight", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const first = new Promise((resolve) => { resolveFirst = resolve; });
+    const secondJob = { job_id: "j2", investigation_id: "i2", status: "running", attempts: 1, max_attempts: 3, error: null, created_at: null, updated_at: null };
+    mockJobs.getJob
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce(detail({ repo_name: "acme/other", job: secondJob }));
+    const { rerender } = render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" onJobSelected={() => {}} />
+    );
+    rerender(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j2" onJobSelected={() => {}} />
+    );
+    expect(await screen.findByText("acme/other")).toBeDefined();
+    await act(async () => { resolveFirst(detail()); await first; });
+    expect(screen.queryByText("acme/calc")).toBeNull();
+    expect(mockJobs.getJob).toHaveBeenCalledWith("j2");
+  });
+
+  it("shows the clarification question with a refine action", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail({
+      status: "failed",
+      error: { reason: "needs_clarification", message: "What should be investigated?" },
+      user_message: "debug it",
+    }));
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    expect(await screen.findByText("Objective needs clarification")).toBeDefined();
+    expect(screen.getByText("What should be investigated?")).toBeDefined();
+    expect(screen.getByText("Refine objective")).toBeDefined();
   });
 
   it("renders the persisted report when polling observes completion", async () => {
@@ -110,7 +158,7 @@ describe("WorkbenchView job restoration", () => {
       .mockResolvedValueOnce(detail())
       .mockResolvedValueOnce(detail({ status: "completed", progress_pct: 100, final_report: debugReport() }));
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
     );
     expect(await screen.findByText("acme/calc")).toBeDefined();
     // One 3s poll later the completed report renders without a restart.
@@ -157,7 +205,7 @@ describe("WorkbenchView job restoration", () => {
     mockJobs.getJob.mockResolvedValueOnce(detail());
     mockJobs.cancelJob.mockResolvedValueOnce(detail({ status: "cancelled" }));
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
     );
     expect(await screen.findByText("acme/calc")).toBeDefined();
     fireEvent.click(screen.getByText("Cancel investigation"));
@@ -165,9 +213,17 @@ describe("WorkbenchView job restoration", () => {
     expect(mockJobs.cancelJob).toHaveBeenCalledWith("j1");
   });
 
-  it("submits General investigations for server-side routing", async () => {
-    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+  it("classifies General objectives before queueing with the route", async () => {
+    const onJobSelected = vi.fn();
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} onJobSelected={onJobSelected} />);
     mockApi.apiJson.mockResolvedValueOnce({ status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] });
+    mockGeneral.classifyObjective.mockResolvedValueOnce({
+      selected_mode: "debug",
+      rationale: "Failure signals matched.",
+      confidence: "high",
+      signals: { debug: ["fail*"] },
+      source: "deterministic",
+    });
     mockJobs.createJob.mockResolvedValueOnce({ job_id: "j7", investigation_id: "i7", status: "queued" });
     mockJobs.getJob.mockResolvedValueOnce(detail({ mode: "general", selected_mode: "debug", job: { job_id: "j7", investigation_id: "i7", status: "queued", attempts: 0, max_attempts: 3, error: null, created_at: null, updated_at: null }, status: "queued", progress_pct: 0 }));
     fireEvent.change(screen.getByLabelText("GitHub repository URL"), { target: { value: "https://github.com/acme/calc" } });
@@ -178,18 +234,70 @@ describe("WorkbenchView job restoration", () => {
       target: { value: "fix the failing tests" },
     });
     fireEvent.click(screen.getByText("Start investigation"));
-    expect(mockJobs.createJob).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockJobs.createJob).toHaveBeenCalledTimes(1));
+    expect(mockGeneral.classifyObjective).toHaveBeenCalledWith("fix the failing tests");
     expect(mockJobs.createJob).toHaveBeenCalledWith({
       ingestion_id: "ing1",
       mode: "general",
       message: "fix the failing tests",
+      selected_mode: "debug",
+      routing_rationale: "Failure signals matched.",
+      routing_confidence: "high",
+      routing_source: "deterministic",
     });
+    expect(onJobSelected).toHaveBeenCalledWith("j7");
     expect(await screen.findByText(/GENERAL → DEBUG INVESTIGATION/)).toBeDefined();
+  });
+
+  it("asks a follow-up question for vague General objectives without queueing", async () => {
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    mockApi.apiJson.mockResolvedValueOnce({ status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] });
+    mockGeneral.classifyObjective.mockResolvedValueOnce({
+      selected_mode: null,
+      reason: "needs_clarification",
+      question: "What should be investigated?",
+      rationale: "Too vague.",
+      confidence: "none",
+      signals: { debug: [], explain: [], health: [] },
+      suggested_mode: "debug",
+      source: "deterministic",
+    });
+    fireEvent.change(screen.getByLabelText("GitHub repository URL"), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    expect(await screen.findByText("What should RepoRescue do?")).toBeDefined();
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), {
+      target: { value: "debug it" },
+    });
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("What should be investigated?")).toBeDefined();
+    expect(mockJobs.createJob).not.toHaveBeenCalled();
+    // Repository selection and objective text are preserved.
+    expect(screen.getByText("acme/calc")).toBeDefined();
+    expect(
+      (screen.getByLabelText("Problem statement or objective") as HTMLTextAreaElement).value
+    ).toBe("debug it");
+    // Refining clears the question; a routed retry queues exactly once.
+    mockGeneral.classifyObjective.mockResolvedValueOnce({
+      selected_mode: "debug",
+      rationale: "Failure signals matched.",
+      confidence: "medium",
+      signals: { debug: ["fail*"] },
+      source: "deterministic",
+    });
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j8", investigation_id: "i8", status: "queued" });
+    mockJobs.getJob.mockResolvedValueOnce(detail({ job: { job_id: "j8", investigation_id: "i8", status: "queued", attempts: 0, max_attempts: 3, error: null, created_at: null, updated_at: null }, status: "queued", progress_pct: 0 }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), {
+      target: { value: "find why the login tests fail" },
+    });
+    expect(screen.queryByText("What should be investigated?")).toBeNull();
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect((await screen.findAllByText(/QUEUED/)).length).toBeGreaterThan(0);
+    expect(mockJobs.createJob).toHaveBeenCalledTimes(1);
   });
 
   it("renders persisted conversation history read-only", async () => {
     mockJobs.getJob.mockResolvedValueOnce(detail({ messages: [{ role: "user", content: "Where is the parser?" }, { role: "assistant", content: "The API persisted this response." }] }));
-    render(<WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />);
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     expect(screen.getByText("Where is the parser?")).toBeDefined();
@@ -204,7 +312,7 @@ describe("WorkbenchView job restoration", () => {
       patches: [{ status: "proposed", reason: "Adjust the boundary.", files: [{ file: "src/range.py", before: "range(3)", after: "range(4)" }] }],
       verification_status: "unverified",
     }));
-    render(<WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />);
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: /Findings/ }));
     expect(screen.getByText("Possible boundary error")).toBeDefined();
@@ -216,6 +324,70 @@ describe("WorkbenchView job restoration", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
     expect(screen.getByText("proposed")).toBeDefined();
     expect(screen.getByText(/this patch has not been confirmed as a fix/)).toBeDefined();
+  });
+
+  it("renders structured explanation sections with copyable commands", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail({
+      status: "completed",
+      final_report: {
+        summary: "## Overview\n\nAuth verifies users.\n\n## How to use it\n\n```bash\npytest -q\n```\n",
+      },
+    }));
+    const { container } = render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    expect(await screen.findByText("Auth verifies users.")).toBeDefined();
+    expect(container.querySelector(".md h3")?.textContent).toBe("Overview");
+    expect(screen.getByText("pytest -q")).toBeDefined();
+    expect(screen.getByText("Copy")).toBeDefined();
+  });
+
+  it("renders the active investigation above the setup form", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail());
+    const { container } = render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    const results = container.querySelector(".workbench-results");
+    const setup = container.querySelector(".setup-disclosure");
+    expect(results).toBeDefined();
+    expect(setup).toBeDefined();
+    expect(
+      results!.compareDocumentPosition(setup!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it("collapses the setup form once an investigation starts", async () => {
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    mockApi.apiJson.mockResolvedValueOnce({ status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] });
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j9", investigation_id: "i9", status: "queued" });
+    mockJobs.getJob.mockResolvedValueOnce(detail({ job: { job_id: "j9", investigation_id: "i9", status: "queued", attempts: 0, max_attempts: 3, error: null, created_at: null, updated_at: null }, status: "queued", progress_pct: 0 }));
+    fireEvent.change(screen.getByLabelText("GitHub repository URL"), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    expect(await screen.findByText("What should RepoRescue do?")).toBeDefined();
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect((await screen.findAllByText(/QUEUED/)).length).toBeGreaterThan(0);
+    expect(
+      document.querySelector(".setup-disclosure")?.hasAttribute("open")
+    ).toBe(false);
+  });
+
+  it("hides empty evidence objects but keeps real evidence inspectable", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail({
+      findings: [
+        { kind: "fact", category: "t", title: "Empty evidence", detail: "d", confidence: "confirmed", evidence: {} },
+        { kind: "fact", category: "t", title: "Real evidence", detail: "d", confidence: "confirmed", evidence: { file: "src/a.py", line: 3 } },
+      ],
+    }));
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: /Findings/ }));
+    expect(screen.getAllByText("Inspect finding evidence").length).toBe(1);
+    fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
+    expect(screen.queryByText("Empty evidence")).toBeNull();
+    expect(screen.getByText("Real evidence")).toBeDefined();
   });
 });
 
@@ -302,7 +474,7 @@ describe("WorkbenchView patch download", () => {
     mockJobs.getJob.mockResolvedValueOnce(appliedDetail());
     mockPatches.downloadInvestigationPatch.mockResolvedValueOnce({ filename: "x.patch" });
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
     );
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
@@ -318,7 +490,7 @@ describe("WorkbenchView patch download", () => {
       new ApiError(404, "No downloadable patch is available for this investigation.")
     );
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
     );
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
@@ -341,10 +513,58 @@ describe("WorkbenchView patch download", () => {
       })
     );
     render(
-      <WorkbenchView session={session} onUnauthorized={() => {}} restoredJobId="j1" />
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
     );
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
     expect(screen.queryByText("Download .patch")).toBeNull();
+  });
+
+  it("shows affected files and how-to-apply instructions", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(appliedDetail());
+    const { container } = render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.getByText("AFFECTED FILES")).toBeDefined();
+    expect(screen.getAllByText("pkg/calc.py").length).toBeGreaterThan(0);
+    expect(screen.getByText("How to apply this patch")).toBeDefined();
+    expect(container.textContent).toContain("git apply --check reporescue-fix.patch");
+    expect(container.textContent).toContain("git apply -R reporescue-fix.patch");
+    expect(container.textContent).toContain("Downloading never modifies your repositories.");
+  });
+
+  it("names the saved file and offers to download again", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(appliedDetail());
+    mockPatches.downloadInvestigationPatch.mockResolvedValueOnce({ filename: "x.patch" });
+    const { container } = render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    fireEvent.click(screen.getByText("Download .patch"));
+    expect(await screen.findByText("Download again")).toBeDefined();
+    expect(screen.getByText("x.patch")).toBeDefined();
+    expect(container.textContent).toContain("browser’s download location");
+    expect(container.textContent).toContain("git apply x.patch");
+  });
+
+  it("labels proposed patches as not applied anywhere", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(
+      detail({
+        status: "completed",
+        patches: [{ status: "proposed", reason: "Maybe.", files: [] }],
+        verification_status: "unverified",
+      })
+    );
+    render(
+      <WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />
+    );
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(
+      screen.getByText("Proposed: suggested by the model, not applied anywhere.")
+    ).toBeDefined();
   });
 });

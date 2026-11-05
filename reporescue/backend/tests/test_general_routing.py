@@ -219,11 +219,80 @@ def test_empty_objective_is_unroutable():
         assert routing["confidence"] == "none"
 
 
-def test_ambiguous_objective_falls_back_to_health_honestly():
+def test_vague_objective_asks_for_clarification():
     routing = route_objective("look at this repo")
+    assert routing["selected_mode"] is None
+    assert routing["reason"] == "needs_clarification"
+    assert routing["confidence"] == "none"
+    assert routing["suggested_mode"] is None
+    assert "unclear" in routing["question"]
+    assert "instead of assuming an objective" in routing["rationale"]
+
+
+def test_debug_intent_without_failure_asks_what_to_investigate():
+    routing = route_objective("I want to debug it.")
+    assert routing["selected_mode"] is None
+    assert routing["reason"] == "needs_clarification"
+    assert routing["suggested_mode"] == "debug"
+    assert "test suite" in routing["question"]
+
+
+def test_bare_explain_request_asks_what_to_explain():
+    routing = route_objective("explain this")
+    assert routing["selected_mode"] is None
+    assert routing["reason"] == "needs_clarification"
+    assert routing["suggested_mode"] == "explain"
+    assert "what to explain" in routing["question"]
+
+
+def test_bare_review_request_asks_for_focus():
+    routing = route_objective("review this repo")
+    assert routing["selected_mode"] is None
+    assert routing["reason"] == "needs_clarification"
+    assert routing["suggested_mode"] == "health"
+    assert "broad health and security assessment" in routing["question"]
+
+
+def test_specific_failing_tests_route_to_debug():
+    routing = route_objective("Find why the authentication tests are failing.")
+    assert routing["selected_mode"] == "debug"
+    assert routing["confidence"] in ("high", "medium")
+
+
+def test_how_question_routes_to_explain():
+    routing = route_objective(
+        "Explain how authentication works and how I can run it locally."
+    )
+    assert routing["selected_mode"] == "explain"
+    assert routing["confidence"] in ("high", "medium")
+
+
+def test_security_review_routes_to_health():
+    routing = route_objective(
+        "Review the repository for security and maintainability problems."
+    )
     assert routing["selected_mode"] == "health"
-    assert routing["confidence"] == "low"
-    assert "broad repository health assessment" in routing["rationale"]
+    assert routing["confidence"] in ("high", "medium")
+
+
+def test_single_specific_signal_still_routes():
+    routing = route_objective("the total is incorrect")
+    assert routing["selected_mode"] == "debug"
+
+
+def test_bug_signal_does_not_match_inside_debug():
+    from app.general import DEBUG_SIGNALS, _signal_matches
+
+    assert _signal_matches("please debug it", DEBUG_SIGNALS) == ["debug*"]
+    assert _signal_matches("open the debugger", DEBUG_SIGNALS) == ["debug*"]
+
+
+def test_prefix_signals_match_word_starts_only():
+    from app.general import DEBUG_SIGNALS, HEALTH_SIGNALS, _signal_matches
+
+    assert "fail*" in _signal_matches("it is failing", DEBUG_SIGNALS)
+    assert _signal_matches("an unfailing check", DEBUG_SIGNALS) == []
+    assert "maintain*" in _signal_matches("maintainability", HEALTH_SIGNALS)
 
 
 def test_tie_breaks_debug_over_explain_with_low_confidence():
@@ -456,3 +525,206 @@ def test_build_context_for_worker_skips_phases_for_stub_ingest(owner):
 
 def test_ingest_repository_accepts_phase_callback():
     assert "on_phase" in inspect.signature(ingest_repository).parameters
+
+
+# --- clarification at the route stage ---
+
+
+def test_general_vague_objective_fails_with_question(monkeypatch, project_dir, owner):
+    record = _owned_record(monkeypatch, project_dir, owner)
+    ctx = _general_ctx(record, owner, "I want to debug it.")
+
+    outcome = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
+
+    assert outcome.status == "failed"
+    assert outcome.error["reason"] == "needs_clarification"
+    assert "test suite" in outcome.error["message"]
+
+
+# --- pre-classified routes ---
+
+
+def test_preselected_route_is_honored(monkeypatch, project_dir, owner):
+    record = _owned_record(monkeypatch, project_dir, owner)
+    ctx = _general_ctx(record, owner, "look at this repo")
+    ctx = replace(
+        ctx,
+        preselected_mode="explain",
+        preselect_rationale="Model chose explain.",
+        preselect_confidence="high",
+        preselect_source="model",
+    )
+
+    outcome = execute(
+        ctx, progress=NullRecorder(),
+        deps=HandlerDeps(backend=_ExplodingBackend(), summarize=lambda **k: "ok"),
+    )
+
+    assert outcome.status == "complete"
+    assert outcome.report["selected_mode"] == "explain"
+    assert outcome.report["routing"]["source"] == "model"
+    assert outcome.report["routing"]["rationale"] == "Model chose explain."
+
+
+def test_invalid_preselect_falls_back_to_deterministic(monkeypatch, project_dir, owner):
+    record = _owned_record(monkeypatch, project_dir, owner)
+    ctx = _general_ctx(record, owner, "fix the failing tests")
+    ctx = replace(ctx, preselected_mode="bogus")
+
+    outcome = execute(
+        ctx, progress=NullRecorder(),
+        deps=HandlerDeps(backend=_FakeBackend(_scripted()), diagnose=_fix_diagnose),
+    )
+
+    assert outcome.status == "complete"
+    assert outcome.report["selected_mode"] == "debug"
+
+
+def test_build_context_validates_preselect(monkeypatch, project_dir, owner):
+    record = _owned_record(monkeypatch, project_dir, owner)
+    valid = build_context_from_record(
+        record, ingestion_id=record["ingestion_id"], owner_id=owner,
+        mode="general", message="x", preselected_mode="debug",
+        preselect_rationale="r", preselect_confidence="high",
+        preselect_source="model",
+    )
+    assert valid.preselected_mode == "debug"
+    assert valid.preselect_source == "model"
+    invalid = build_context_from_record(
+        record, ingestion_id=record["ingestion_id"], owner_id=owner,
+        mode="general", message="x", preselected_mode="bogus",
+    )
+    assert invalid.preselected_mode is None
+
+
+def test_create_investigation_drops_invalid_preselect(db, owner):
+    investigation, _ = create_investigation(
+        db, owner_id=owner, repo_url="https://github.com/acme/calc",
+        repo_name="acme/calc", commit_sha=FAKE_SHA, mode="general",
+        user_message="x", preselected_mode="bogus",
+    )
+    assert investigation.preselected_mode is None
+    assert investigation.preselect_rationale is None
+
+
+def test_worker_honors_preselected_route(monkeypatch, project_dir, db, factory, owner):
+    from app.jobqueue import claim_next_job
+    from app.models import Job
+    from app.worker import run_job
+
+    _stub_clone(monkeypatch, project_dir)
+    investigation, job = create_investigation(
+        db, owner_id=owner, repo_url="https://github.com/acme/calc",
+        repo_name="acme/calc", commit_sha=FAKE_SHA, mode="general",
+        user_message="look at this repo",
+        preselected_mode="debug", preselect_rationale="Preclassified.",
+        preselect_confidence="high", preselect_source="model",
+    )
+    db.commit()
+    claimed = claim_next_job(db, "test-worker")
+    assert claimed is not None and claimed.id == job.id
+
+    status = run_job(
+        factory, job.id, "test-worker",
+        backend=_FakeBackend(_scripted()), diagnose=_fix_diagnose,
+        summarize=lambda **k: "ok",
+    )
+    assert status == "completed"
+    db.expire_all()
+
+    row = db.get(Investigation, investigation.id)
+    assert db.get(Job, job.id).status == "completed"
+    assert row.mode == "general"
+    assert row.selected_mode == "debug"
+    assert row.routing["source"] == "model"
+
+
+# --- classify endpoint ---
+
+
+def _classify_user(owner):
+    from app.auth import AuthenticatedUser
+
+    return AuthenticatedUser(id=owner, email=None, claims={})
+
+
+def test_classify_high_confidence_skips_model(owner, monkeypatch):
+    from app import main as main_module
+
+    def explode(**kwargs):
+        raise AssertionError("model must not be consulted")
+
+    monkeypatch.setattr(
+        main_module.meta_client_module, "classify_objective", explode
+    )
+    result = main_module.classify_general_route(
+        main_module.ClassifyRequest(
+            message="tests are failing with an assertion error, please fix the bug"
+        ),
+        _classify_user(owner),
+    )
+    assert result["selected_mode"] == "debug"
+    assert result["source"] == "deterministic"
+
+
+def test_classify_uses_model_for_ambiguous_objective(owner, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setenv("REPORESCUE_AI_MODE", "meta")
+    monkeypatch.setenv("META_API_KEY", "test-key-not-real")
+    monkeypatch.setattr(
+        main_module.meta_client_module, "classify_objective",
+        lambda **kwargs: {
+            "selected_mode": "health",
+            "rationale": "Model rationale.",
+            "confidence": "medium",
+        },
+    )
+    result = main_module.classify_general_route(
+        main_module.ClassifyRequest(message="look at this repo"),
+        _classify_user(owner),
+    )
+    assert result["selected_mode"] == "health"
+    assert result["source"] == "model"
+
+
+def test_classify_falls_back_when_model_fails(owner, monkeypatch):
+    from app import main as main_module
+    from app.meta_client import MetaAPIError
+
+    monkeypatch.setenv("REPORESCUE_AI_MODE", "meta")
+    monkeypatch.setenv("META_API_KEY", "test-key-not-real")
+
+    def fail(**kwargs):
+        raise MetaAPIError("down")
+
+    monkeypatch.setattr(
+        main_module.meta_client_module, "classify_objective", fail
+    )
+    result = main_module.classify_general_route(
+        main_module.ClassifyRequest(message="look at this repo"),
+        _classify_user(owner),
+    )
+    assert result["selected_mode"] is None
+    assert result["reason"] == "needs_clarification"
+    assert result["source"] == "deterministic"
+
+
+def test_classify_stub_mode_never_calls_model(owner, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.delenv("REPORESCUE_AI_MODE", raising=False)
+    monkeypatch.delenv("META_API_KEY", raising=False)
+
+    def explode(**kwargs):
+        raise AssertionError("model must not be consulted in stub mode")
+
+    monkeypatch.setattr(
+        main_module.meta_client_module, "classify_objective", explode
+    )
+    result = main_module.classify_general_route(
+        main_module.ClassifyRequest(message="look at this repo"),
+        _classify_user(owner),
+    )
+    assert result["reason"] == "needs_clarification"
+    assert result["source"] == "deterministic"

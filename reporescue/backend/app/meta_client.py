@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import re
 import urllib.error
@@ -11,10 +12,16 @@ from typing import Any
 
 from .patch_guard import FileEdit, PatchProposal, PatchSet
 
+logger = logging.getLogger("reporescue.meta")
+
 API_URL = "https://api.meta.ai/v1/chat/completions"
 MODEL = "muse-spark-1.3"
 REASONING_EFFORT = "minimal"
 MAX_OUTPUT_TOKENS = 800
+# Repair responses carry before/after source blocks (the guard allows
+# ~8000 chars of patch text), so they need a budget that can actually
+# hold the requested JSON schema; prose answers stay at 800.
+MAX_REPAIR_TOKENS = 2000
 REQUEST_TIMEOUT_SECONDS = 60
 
 MAX_CONTEXT_CHARS = 12000
@@ -30,6 +37,8 @@ MAX_FAILURE_CHARS = 4000
 MAX_PATCHSET_EDITS = 5
 MAX_EXPLAIN_MESSAGE_CHARS = 2000
 MAX_STATIC_MESSAGE_CHARS = 2000
+MAX_CLASSIFY_MESSAGE_CHARS = 2000
+MAX_CLASSIFY_TOKENS = 300
 
 AI_MODE_ENV_VAR = "REPORESCUE_AI_MODE"
 API_KEY_ENV_VAR = "META_API_KEY"
@@ -59,6 +68,14 @@ class MetaResponseError(MetaClientError):
     """The API response was not usable (bad JSON or schema)."""
 
 
+class MetaRefusalError(MetaClientError):
+    """The model refused the request or output was content-filtered.
+
+    Deliberately NOT a MetaResponseError: a refusal must fail fast
+    with its own reason instead of being retried as invalid output.
+    """
+
+
 def get_ai_mode() -> str:
     """Return 'stub' (default) or 'meta' from the backend environment."""
     mode = os.environ.get(AI_MODE_ENV_VAR, "stub").strip().lower()
@@ -79,6 +96,22 @@ def get_api_key() -> str:
             "to use meta mode. The key is never logged."
         )
     return key
+
+
+def api_error_reason(exc: MetaAPIError) -> str:
+    """Map an API transport failure to a pipeline error reason.
+
+    ``rate_limit`` (429) and ``api_error`` (5xx, 408, network failures
+    with no status) are transient and may be requeued with backoff;
+    ``api_rejected`` (any other 4xx) is a permanently invalid request
+    and must fail fast without retries.
+    """
+    status = exc.status_code
+    if isinstance(exc, MetaRateLimitError) or status == 429:
+        return "rate_limit"
+    if status is None or status == 408 or status >= 500:
+        return "api_error"
+    return "api_rejected"
 
 
 def propose_patch(source_files: list[str]) -> PatchProposal:
@@ -120,7 +153,7 @@ def diagnose_and_propose(
     payload = {
         "model": MODEL,
         "messages": messages,
-        "max_completion_tokens": MAX_OUTPUT_TOKENS,
+        "max_completion_tokens": MAX_REPAIR_TOKENS,
         "reasoning_effort": REASONING_EFFORT,
     }
     data = _post_chat_completion(key, payload)
@@ -195,7 +228,7 @@ def diagnose_and_propose_from_evidence(
     payload = {
         "model": MODEL,
         "messages": messages,
-        "max_completion_tokens": MAX_OUTPUT_TOKENS,
+        "max_completion_tokens": MAX_REPAIR_TOKENS,
         "reasoning_effort": REASONING_EFFORT,
     }
     data = _post_chat_completion(key, payload)
@@ -335,8 +368,22 @@ def build_explain_messages(
                 "repository does, how its main parts fit together, and where "
                 "a newcomer should start. Base the explanation only on the "
                 "profile, structure, and excerpts provided; do not invent "
-                "files, behavior, or dependencies. Respond with plain "
-                "Markdown prose and no JSON."
+                "files, behavior, or dependencies. Respond with Markdown "
+                "prose and no JSON, organized with Markdown headings into "
+                "only the sections that fit the question: Overview; How it "
+                "works (the relevant flows and steps); Important files "
+                "(actual paths from the excerpts and their "
+                "responsibilities); How the components connect; How to use "
+                "it (prerequisites and exact commands); Security "
+                "considerations (only findings supported by the evidence); "
+                "Next steps. When the question is how to clone and run the "
+                "project, cover prerequisites, the exact clone command, "
+                "dependency installation, environment variables, database "
+                "setup and migrations when applicable, run and test "
+                "commands, and common problems with solutions. Omit sections "
+                "that do not apply. Cite real file paths; never invent "
+                "paths, scripts, dependencies, or variables. State plainly "
+                "what was not executed or verified."
             ),
         },
         {"role": "user", "content": "\n\n".join(user_parts)},
@@ -365,7 +412,7 @@ def diagnose_static_from_evidence(
     payload = {
         "model": MODEL,
         "messages": messages,
-        "max_completion_tokens": MAX_OUTPUT_TOKENS,
+        "max_completion_tokens": MAX_REPAIR_TOKENS,
         "reasoning_effort": REASONING_EFFORT,
     }
     data = _post_chat_completion(key, payload)
@@ -508,6 +555,92 @@ def build_health_messages(
     ]
 
 
+CLASSIFY_MODES = ("debug", "explain", "health")
+CLASSIFY_CONFIDENCES = ("high", "medium", "low")
+
+
+def build_classify_messages(objective: str) -> list[dict[str, str]]:
+    """Build bounded chat messages for one routing-classification request."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a routing classifier for a repository engineering "
+                "tool. Classify the user's objective into exactly one mode: "
+                "'debug' (investigate a specific failure, bug, or broken "
+                "behavior), 'explain' (understand how code works or how to "
+                "do something), or 'health' (review or assess quality, "
+                "security, or maintainability). Respond with exactly one "
+                "JSON object and no other text: {\"mode\": <mode or null>, "
+                "\"confidence\": <\"high\"|\"medium\"|\"low\"|\"none\">, "
+                "\"rationale\": <one sentence>, \"question\": <clarifying "
+                "question or null>}. When the objective is too vague to "
+                "classify (no failure, no question, no focus), set mode to "
+                "null, confidence to \"none\", and ask one clear clarifying "
+                "question."
+            ),
+        },
+        {"role": "user", "content": objective[:MAX_CLASSIFY_MESSAGE_CHARS]},
+    ]
+
+
+def classify_objective(
+    *, objective: str, api_key: str | None = None
+) -> dict[str, Any]:
+    """Route one objective with the model; return a routing-shaped dict.
+
+    Returns ``{"selected_mode", "rationale", "confidence"}`` or
+    ``{"selected_mode": None, "reason": "needs_clarification",
+    "question", ...}``. Raises MetaConfigError, MetaRateLimitError,
+    MetaAPIError, MetaRefusalError, or MetaResponseError; callers fall
+    back to deterministic keyword routing on any failure.
+    """
+    key = api_key or get_api_key()
+    payload = {
+        "model": MODEL,
+        "messages": build_classify_messages(objective),
+        "max_completion_tokens": MAX_CLASSIFY_TOKENS,
+        "reasoning_effort": REASONING_EFFORT,
+    }
+    data = _post_chat_completion(key, payload)
+    content, _ = _extract_content(data)
+    parsed = _parse_json_object(content, None)
+    return _to_classification(parsed)
+
+
+def _to_classification(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate a model classification into a routing-shaped dict."""
+    mode = payload.get("mode")
+    confidence = payload.get("confidence")
+    rationale = payload.get("rationale")
+    question = payload.get("question")
+    if mode is not None and mode not in CLASSIFY_MODES:
+        raise MetaResponseError("Meta API classification has an invalid mode.")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise MetaResponseError("Meta API classification has an empty rationale.")
+    if mode is None:
+        if confidence != "none":
+            raise MetaResponseError(
+                "Meta API clarification must use confidence 'none'."
+            )
+        if not isinstance(question, str) or not question.strip():
+            raise MetaResponseError("Meta API clarification has no question.")
+        return {
+            "selected_mode": None,
+            "reason": "needs_clarification",
+            "question": question.strip()[:2000],
+            "rationale": rationale.strip()[:2000],
+            "confidence": "none",
+        }
+    if confidence not in CLASSIFY_CONFIDENCES:
+        raise MetaResponseError("Meta API classification has an invalid confidence.")
+    return {
+        "selected_mode": mode,
+        "rationale": rationale.strip()[:2000],
+        "confidence": confidence,
+    }
+
+
 def _render_context(workspace: Path) -> str:
     """Render workspace source files, bounded by MAX_CONTEXT_CHARS."""
     chunks: list[str] = []
@@ -614,16 +747,80 @@ def _html_to_text(raw: str) -> str:
 
 
 def _extract_content(data: dict[str, Any]) -> tuple[str, str | None]:
+    """Extract assistant text from a chat-completion response.
+
+    Handles plain string content and content-block lists (``[{"type":
+    "text", "text": "..."}]``). Refusals and content-filter
+    terminations raise :class:`MetaRefusalError` (fail fast, never
+    retried as invalid output). Shape diagnostics go to the server log
+    only; raised messages stay credential-free.
+    """
+    error = data.get("error")
     choices = data.get("choices")
+    if isinstance(error, dict) and not choices:
+        detail = error.get("message")
+        label = (
+            str(detail).strip()[:200]
+            if isinstance(detail, str) and detail.strip()
+            else "unknown provider error"
+        )
+        raise MetaAPIError(f"Meta API returned an error envelope: {label}.")
     if not isinstance(choices, list) or not choices:
         raise MetaResponseError("Meta API response contained no choices.")
     first = choices[0] if isinstance(choices[0], dict) else {}
-    message = first.get("message", {})
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str) or not content.strip():
+    raw_finish = first.get("finish_reason")
+    finish = raw_finish if isinstance(raw_finish, str) else None
+    message = first.get("message")
+    if not isinstance(message, dict):
+        logger.warning(
+            "meta_extract_no_message keys=%s finish_reason=%s",
+            sorted(first) if isinstance(first, dict) else type(first).__name__,
+            finish,
+        )
         raise MetaResponseError("Meta API response contained no message content.")
-    finish_reason = first.get("finish_reason")
-    return content, finish_reason if isinstance(finish_reason, str) else None
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        logger.warning("meta_refusal finish_reason=%s", finish)
+        raise MetaRefusalError(
+            f"Model refused the request: {refusal.strip()[:500]}"
+        )
+    if finish == "content_filter":
+        logger.warning("meta_content_filter")
+        raise MetaRefusalError("Model output was blocked by content filtering.")
+    content = message.get("content")
+    if isinstance(content, list):
+        texts: list[str] = []
+        block_types: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_types.append(str(block.get("type", "?")))
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                texts.append(block["text"])
+        logger.info(
+            "meta_extract_blocks types=%s text_parts=%d finish_reason=%s",
+            ",".join(block_types[:8]) or "none",
+            len(texts),
+            finish,
+        )
+        content = "\n".join(part for part in texts if part.strip())
+        if not content.strip():
+            raise MetaResponseError(
+                "Meta API response carried no usable text content blocks."
+            )
+    if not isinstance(content, str) or not content.strip():
+        logger.warning(
+            "meta_extract_empty content_type=%s finish_reason=%s",
+            type(message.get("content")).__name__,
+            finish,
+        )
+        if finish == "length":
+            raise MetaResponseError(
+                "Meta API returned no message content; the output was "
+                "truncated by the output-token limit."
+            )
+        raise MetaResponseError("Meta API response contained no message content.")
+    return content, finish
 
 
 def _parse_json_object(content: str, finish_reason: str | None) -> dict[str, Any]:

@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import type { Session, User } from "@supabase/supabase-js";
 import { useAuth } from "../auth/AuthContext";
+import { useTheme } from "../theme/ThemeContext";
 import { ApiError } from "../lib/api";
 import { normalizeUsername, usernameError } from "../lib/auth-validation";
 import {
@@ -59,10 +60,12 @@ export default function SettingsView({
   user,
   session,
   onSignOut,
+  onProfileChanged = () => {},
 }: {
   user: User | null;
   session: Session | null;
   onSignOut: () => void;
+  onProfileChanged?: () => void;
 }) {
   const provider = user ? providerOf(user) : null;
   const {
@@ -79,6 +82,8 @@ export default function SettingsView({
   const [draftError, setDraftError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const { preference: themePreference, setPreference: setThemePreference } =
+    useTheme();
   const [github, setGithub] = useState<GithubLink | null>(null);
   const [githubBusy, setGithubBusy] = useState<
     "connect" | "disconnect" | "replace" | null
@@ -195,6 +200,7 @@ export default function SettingsView({
       const profile = await updateUsername(normalizeUsername(draft));
       setUsername(profile.username);
       setSaved(true);
+      onProfileChanged();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setDraftError("That username is taken. Pick another one.");
@@ -244,6 +250,32 @@ export default function SettingsView({
             </dd>
           </div>
         </dl>
+      </section>
+
+      <section className="surface-section theme-section" aria-labelledby="theme-heading">
+        <div className="section-title-row"><div><p className="eyebrow">APPEARANCE</p><h3 id="theme-heading">Theme</h3></div></div>
+        <div className="theme-options" role="radiogroup" aria-label="Color theme">
+          {(
+            [
+              { id: "light", title: "Light", blurb: "Bright surfaces, dark code." },
+              { id: "dark", title: "Dark", blurb: "Dark everywhere." },
+              { id: "system", title: "System", blurb: "Follow the OS setting." },
+            ] as const
+          ).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="radio"
+              aria-checked={themePreference === option.id}
+              className={`theme-option${themePreference === option.id ? " selected" : ""}`}
+              onClick={() => setThemePreference(option.id)}
+            >
+              <strong>{option.title}</strong>
+              <small>{option.blurb}</small>
+            </button>
+          ))}
+        </div>
+        <p className="hint">The choice persists across refreshes and sessions.</p>
       </section>
 
       <section className="surface-section username-section">

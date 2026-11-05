@@ -91,6 +91,10 @@ class InvestigationContext:
     excerpts: dict[str, str]
     file_lists: dict[str, list[str]] = field(default_factory=dict)
     routing: dict[str, Any] | None = None
+    preselected_mode: str | None = None
+    preselect_rationale: str | None = None
+    preselect_confidence: str | None = None
+    preselect_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -425,6 +429,10 @@ def build_context_from_record(
     message: str | None = None,
     max_attempts: int = 3,
     plan_id: str | None = None,
+    preselected_mode: str | None = None,
+    preselect_rationale: str | None = None,
+    preselect_confidence: str | None = None,
+    preselect_source: str | None = None,
 ) -> InvestigationContext:
     """Build validated context from a live ingestion record (sync path).
 
@@ -455,6 +463,10 @@ def build_context_from_record(
         message=message,
         max_attempts=max_attempts,
         plan_id=plan_id,
+        preselected_mode=preselected_mode,
+        preselect_rationale=preselect_rationale,
+        preselect_confidence=preselect_confidence,
+        preselect_source=preselect_source,
     )
 
 
@@ -470,6 +482,10 @@ def build_context_for_worker(
     plan_id: str | None = None,
     ingest_fn: Callable[..., dict[str, Any]] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    preselected_mode: str | None = None,
+    preselect_rationale: str | None = None,
+    preselect_confidence: str | None = None,
+    preselect_source: str | None = None,
 ) -> InvestigationContext:
     """Rebuild context for a background job without the global store.
 
@@ -511,6 +527,10 @@ def build_context_for_worker(
         message=message,
         max_attempts=max_attempts,
         plan_id=plan_id,
+        preselected_mode=preselected_mode,
+        preselect_rationale=preselect_rationale,
+        preselect_confidence=preselect_confidence,
+        preselect_source=preselect_source,
     )
 
 
@@ -525,12 +545,18 @@ def assemble_context(
     max_attempts: int,
     plan_id: str | None,
     file_lists: Any = None,
+    preselected_mode: str | None = None,
+    preselect_rationale: str | None = None,
+    preselect_confidence: str | None = None,
+    preselect_source: str | None = None,
 ) -> InvestigationContext:
     """Validate parts into an :class:`InvestigationContext`.
 
     Shared by the ownership-verifying builders above and the legacy
     pipeline wrappers, whose callers authorized the record before
-    invoking them; it performs no ownership check itself.
+    invoking them; it performs no ownership check itself. Pre-selected
+    routes (from ``POST /api/general/classify``) are validated here:
+    only a genuine strategy mode is honored downstream.
     """
     if mode not in MODES:
         raise ContextError("bad_mode", f"Unknown investigation mode {mode!r}.")
@@ -553,6 +579,7 @@ def assemble_context(
     # out by validated 40-hex SHA only and never consumes `ref` for
     # repository resolution, so the builder carries it as display-only
     # metadata verbatim.
+    honored = preselected_mode if preselected_mode in ("debug", "explain", "health") else None
     return InvestigationContext(
         investigation_id=investigation_id,
         owner_id=owner_id,
@@ -568,6 +595,18 @@ def assemble_context(
         capabilities=capabilities,
         excerpts=_validate_excerpts(excerpts),
         file_lists=_validate_file_lists(file_lists),
+        preselected_mode=honored,
+        preselect_rationale=(
+            str(preselect_rationale)[:2000] if honored and preselect_rationale else None
+        ),
+        preselect_confidence=(
+            preselect_confidence
+            if honored and preselect_confidence in ("high", "medium", "low")
+            else None
+        ),
+        preselect_source=(
+            str(preselect_source)[:40] if honored and preselect_source else None
+        ),
     )
 
 

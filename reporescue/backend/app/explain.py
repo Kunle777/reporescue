@@ -117,10 +117,15 @@ def stage_explain_summarize(
             excerpts=prepared["excerpts"],
             user_message=user_message,
         )
+    except meta_client.MetaRefusalError as exc:
+        return _failed_result(
+            "summarize", _explain_error(str(exc), "model_refused", profile)
+        )
     except meta_client.MetaRateLimitError as exc:
         return _failed_result("summarize", _explain_error(str(exc), "rate_limit", profile))
     except meta_client.MetaAPIError as exc:
-        return _failed_result("summarize", _explain_error(str(exc), "api_error", profile))
+        reason = meta_client.api_error_reason(exc)
+        return _failed_result("summarize", _explain_error(str(exc), reason, profile))
     except meta_client.MetaResponseError as exc:
         return _failed_result(
             "summarize", _explain_error(str(exc), "invalid_output", profile)

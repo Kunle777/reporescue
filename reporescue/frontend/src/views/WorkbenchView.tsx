@@ -5,7 +5,9 @@ import {
 } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { ApiError, apiJson } from "../lib/api";
+import { classifyObjective, type Classification } from "../lib/general";
 import { cancelJob, createJob, getJob, listJobs } from "../lib/jobs";
+import { Markdown } from "../lib/markdown";
 import { downloadInvestigationPatch } from "../lib/patches";
 import type { IngestResult, InvestigationDetail, InvestigationMode, JobCard, Project } from "../lib/types";
 import { isTerminalStatus } from "../lib/types";
@@ -72,16 +74,18 @@ function DisplayValue({ value }: { value: unknown }) {
 export default function WorkbenchView({
   session,
   onUnauthorized,
-  restoredJobId = null,
-  onJobAdopted = () => {},
+  selectedJobId = null,
+  onJobSelected = () => {},
   projects = [],
   projectsLoading = false,
   onNavigateProjects,
 }: {
   session: Session | null;
   onUnauthorized: () => void;
-  restoredJobId?: string | null;
-  onJobAdopted?: () => void;
+  /** Job id selected by the route (deep link, saved work, restore). */
+  selectedJobId?: string | null;
+  /** Report a user-chosen job so the route (URL) follows the view. */
+  onJobSelected?: (jobId: string | null) => void;
   projects?: Project[];
   projectsLoading?: boolean;
   onNavigateProjects?: () => void;
@@ -96,6 +100,11 @@ export default function WorkbenchView({
   const [userMessage, setUserMessage] = useState("");
   const [investLoading, setInvestLoading] = useState(false);
   const [investError, setInvestError] = useState("");
+  const [classification, setClassification] = useState<Classification | null>(null);
+  const [classifying, setClassifying] = useState(false);
+  // The setup form stays open for a fresh visit and collapses once an
+  // investigation takes focus, so the active work always leads the page.
+  const [setupOpen, setSetupOpen] = useState(() => selectedJobId == null);
   const [jobDetail, setJobDetail] = useState<InvestigationDetail | null>(null);
   const [jobError, setJobError] = useState("");
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
@@ -104,14 +113,17 @@ export default function WorkbenchView({
   const [cancelling, setCancelling] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const [downloadedName, setDownloadedName] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Overview");
   const [adopting, setAdopting] = useState(false);
   const submitting = useRef(false);
   const polling = useRef(false);
-  const adopted = useRef<string | null>(null);
+  const loadSeq = useRef(0);
 
   const jobId = jobDetail?.job?.job_id ?? null;
   const active = Boolean(jobDetail && !isTerminalStatus(jobDetail.status));
+  const appliedPatch = jobDetail?.patches.find((patch) => patch.status === "applied") ?? null;
+  const patchVerified = jobDetail?.verification_status === "passed";
 
   function authError(error: unknown, fallback: string) {
     if (error instanceof ApiError && error.status === 401) {
@@ -143,20 +155,30 @@ export default function WorkbenchView({
     return () => { live = false; };
   }, [session, onUnauthorized]);
 
+  // Fetch the route-selected job (deep link, saved work, restore,
+  // back/forward). Stale responses are dropped so one investigation can
+  // never display another's data.
   useEffect(() => {
-    if (!session || !restoredJobId || adopted.current === restoredJobId) return;
-    adopted.current = restoredJobId;
+    if (!session || !selectedJobId || selectedJobId === jobId) return;
+    const seq = ++loadSeq.current;
     let live = true;
     setAdopting(true);
-    void getJob(restoredJobId).then((detail) => {
-      if (live) { setJobDetail(detail); setTab("Overview"); }
+    setJobError("");
+    void getJob(selectedJobId).then((detail) => {
+      if (!live || seq !== loadSeq.current) return;
+      if (detail.job && detail.job.job_id !== selectedJobId) return;
+      setJobDetail(detail);
+      setPendingJobId(null);
+      setTab("Overview");
     }).catch((error: unknown) => {
-      if (live) setJobError(authError(error, "Could not restore the active investigation."));
+      if (live && seq === loadSeq.current) {
+        setJobError(authError(error, "Could not load this investigation."));
+      }
     }).finally(() => {
-      if (live) { setAdopting(false); onJobAdopted(); }
+      if (live && seq === loadSeq.current) setAdopting(false);
     });
     return () => { live = false; };
-  }, [session, restoredJobId]);
+  }, [session, selectedJobId, jobId]);
 
   useEffect(() => {
     if (!jobId || !active) return;
@@ -165,13 +187,44 @@ export default function WorkbenchView({
       if (polling.current) return;
       polling.current = true;
       void getJob(jobId).then((next) => {
-        if (live) { setJobDetail(next); setJobError(""); }
+        if (!live) return;
+        if (next.job && next.job.job_id !== jobId) return;
+        setJobDetail(next);
+        setJobError("");
       }).catch((error: unknown) => {
         if (live) setJobError(authError(error, "Lost contact with the investigation."));
       }).finally(() => { polling.current = false; });
     }, POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
   }, [jobId, active]);
+
+  // Download state belongs to one investigation; reset on switch.
+  useEffect(() => {
+    setDownloadedName(null);
+    setDownloadError("");
+  }, [jobId]);
+
+  /** Reload one job directly (retry path), dropping stale responses. */
+  async function reloadJob(id: string) {
+    const seq = ++loadSeq.current;
+    setJobError("");
+    setInvestError("");
+    setAdopting(true);
+    try {
+      const detail = await getJob(id);
+      if (seq !== loadSeq.current) return;
+      if (detail.job && detail.job.job_id !== id) return;
+      setJobDetail(detail);
+      setPendingJobId(null);
+      setTab("Overview");
+    } catch (error) {
+      if (seq === loadSeq.current) {
+        setJobError(authError(error, "Could not load this investigation."));
+      }
+    } finally {
+      if (seq === loadSeq.current) setAdopting(false);
+    }
+  }
 
   function selectProject(id: string) {
     setProjectId(id);
@@ -212,17 +265,42 @@ export default function WorkbenchView({
     setDownloading(true);
     setDownloadError("");
     try {
-      await downloadInvestigationPatch(jobDetail.investigation_id);
+      const { filename } = await downloadInvestigationPatch(jobDetail.investigation_id);
+      setDownloadedName(filename);
     } catch (error) {
       setDownloadError(authError(error, "Could not download the patch."));
     } finally { setDownloading(false); }
   }
 
   async function startInvestigation() {
-    if (!ingestResult || submitting.current || investLoading) return;
+    if (!ingestResult || submitting.current || investLoading || classifying) return;
     if (pendingJobId) {
       setJobError(`Job ${pendingJobId.slice(0, 8)} was accepted but its status has not loaded yet. Retry loading it before creating another investigation.`);
       return;
+    }
+    // General classifies first: a vague objective stops here with a
+    // follow-up question (repository selection and text are preserved)
+    // instead of queueing an investigation that cannot answer it.
+    let route: Extract<Classification, { selected_mode: InvestigationMode }> | null = null;
+    if (mode === "general") {
+      setClassifying(true);
+      setInvestError("");
+      setJobError("");
+      try {
+        const result = await classifyObjective(userMessage);
+        setClassification(result);
+        if (!result.selected_mode) {
+          return;
+        }
+        route = result;
+      } catch (error) {
+        setInvestError(authError(error, "Could not classify the objective."));
+        return;
+      } finally {
+        setClassifying(false);
+      }
+    } else {
+      setClassification(null);
     }
     submitting.current = true;
     setInvestLoading(true);
@@ -235,6 +313,14 @@ export default function WorkbenchView({
         mode,
         message: userMessage,
         ...(projectId ? { project_id: projectId } : {}),
+        ...(route
+          ? {
+              selected_mode: route.selected_mode,
+              routing_rationale: route.rationale,
+              routing_confidence: route.confidence,
+              routing_source: route.source,
+            }
+          : {}),
       });
       if (!created.job_id || !created.investigation_id) throw new Error("The API did not return an investigation ID.");
       setPendingJobId(created.job_id);
@@ -245,6 +331,8 @@ export default function WorkbenchView({
         setPendingJobId(null);
         setJobError("");
         setTab("Overview");
+        setSetupOpen(false);
+        onJobSelected(created.job_id);
       } catch (error) {
         setJobError(`The API accepted job ${created.job_id}, but its status could not be loaded. Retry to open that persisted job. ${authError(error, "")}`);
       }
@@ -256,11 +344,13 @@ export default function WorkbenchView({
     }
   }
 
-  async function openJob(id: string) {
+  function openJob(id: string) {
+    // Route-driven: updating the selection fetches through the effect,
+    // so the URL, saved work, and the detail view always agree.
     setJobError("");
     setInvestError("");
-    try { setJobDetail(await getJob(id)); setPendingJobId(null); setJobError(""); setTab("Overview"); }
-    catch (error) { setJobError(authError(error, "Could not load this investigation.")); }
+    setSetupOpen(false);
+    onJobSelected(id);
   }
 
   async function stopJob() {
@@ -282,8 +372,32 @@ export default function WorkbenchView({
         {jobDetail && <span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>}
       </header>
 
+
+      {(jobError || adopting) && <div className={jobError ? "banner banner-error" : "banner banner-info"} role={jobError ? "alert" : "status"}>{jobError ? <AlertTriangle size={17} /> : <LoaderCircle size={17} className="spin" />}<div>{jobError || "Loading the investigation…"}</div>{jobError && <button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void reloadJob(jobId) : pendingJobId ? void reloadJob(pendingJobId) : selectedJobId ? void reloadJob(selectedJobId) : void refreshRecent()}>Retry</button>}</div>}
+
+      {jobDetail && <section className="card workbench-results" aria-label="Investigation results">
+        <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode === "general" && jobDetail.selected_mode ? `GENERAL \u2192 ${jobDetail.selected_mode.toUpperCase()} INVESTIGATION` : `${jobDetail.mode.toUpperCase()} INVESTIGATION`}</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
+        {active && <div className="job-progress"><div className="progress-label"><span>{jobDetail.stage || jobDetail.status}</span><span>{jobDetail.progress_pct}% reported by API</span></div><progress value={jobDetail.progress_pct} max={100} aria-label={`Investigation progress ${jobDetail.progress_pct}%`} /></div>}
+        {jobDetail.error && jobDetail.error.reason === "needs_clarification" && <div className="banner banner-warning" role="status"><CircleHelp size={17} /><div><strong>Objective needs clarification</strong><p>{jobDetail.error.message}</p><p className="hint">Nothing was started. Refine the objective and start a new investigation — the repository selection is preserved.</p></div><button type="button" className="btn btn-secondary btn-sm" onClick={() => { setUserMessage(jobDetail.user_message ?? ""); setSetupOpen(true); window.setTimeout(() => document.getElementById("investigation-objective")?.focus(), 0); }}>Refine objective</button></div>}
+        {jobDetail.error && jobDetail.error.reason !== "needs_clarification" && <div className="banner banner-error" role="status"><AlertTriangle size={17} /><div><strong>{jobDetail.error.reason}</strong><p>{jobDetail.error.message}</p>{jobDetail.status === "failed" && <p className="hint">This is the persisted backend error. Adjust the repository or objective and start a new investigation to retry.</p>}</div></div>}
+        <div className="workbench-tabs" role="tablist" aria-label="Investigation details" onKeyDown={(event) => { if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return; event.preventDefault(); const current = TABS.indexOf(tab); const next = event.key === "Home" ? 0 : event.key === "End" ? TABS.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length; setTab(TABS[next]); document.getElementById(`tab-${TABS[next].toLowerCase()}`)?.focus(); }}>{TABS.map((item) => <button key={item} id={`tab-${item.toLowerCase()}`} type="button" role="tab" tabIndex={tab === item ? 0 : -1} aria-selected={tab === item} aria-controls="workbench-panel" className={`workbench-tab${tab === item ? " active" : ""}`} onClick={() => setTab(item)}>{item}{item === "Findings" && <span>{jobDetail.findings.length}</span>}</button>)}</div>
+        <div id="workbench-panel" role="tabpanel" aria-labelledby={`tab-${tab.toLowerCase()}`} className="workbench-panel">
+          {tab === "Overview" && <div className="overview-grid"><div className="overview-summary"><p className="eyebrow">INVESTIGATION SUMMARY</p>{summary ? <Markdown text={summary} /> : diagnosis ? <Markdown text={diagnosis} /> : <p className="muted">The backend has not returned a final assessment yet.</p>}{jobDetail.limitations.length > 0 && <ul className="limitation-list">{jobDetail.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}</div><div className="overview-facts"><div><span>Stage</span><strong>{jobDetail.stage || "Not reported"}</strong></div><div><span>Verification</span><strong className={pillKind(jobDetail.verification_status)}>{jobDetail.verification_status}</strong></div><div><span>Execution runs</span><strong>{jobDetail.runs.length}</strong></div><div><span>Proposed patches</span><strong>{jobDetail.patches.length}</strong></div></div>{jobDetail.routing && <div className="routing-note"><p className="eyebrow">GENERAL ROUTING</p><strong>Selected analysis: {jobDetail.routing.selected_mode}</strong><p>{jobDetail.routing.rationale}</p><span>Routing confidence: {jobDetail.routing.confidence}</span></div>}{diagnosis && summary && <div className="assessment-note"><ZapIcon /><div><strong>AI assessment</strong><Markdown text={diagnosis} /></div></div>}</div>}
+          {tab === "Findings" && <div className="result-list">{jobDetail.findings.length ? jobDetail.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className="result-item"><div className="result-item-heading"><span className={pillKind(finding.kind)}>{finding.kind}</span>{finding.category && <span className="muted">{finding.category}</span>}<span className="confidence">{finding.confidence} confidence</span></div><h4>{finding.title}</h4>{finding.detail && <div className="finding-detail"><Markdown text={finding.detail} /></div>}{hasEvidence(finding.evidence) && <details><summary>Inspect finding evidence</summary><DisplayValue value={finding.evidence} /></details>}</article>) : <EmptyResult title="No findings returned" text="Findings will appear here when they are present in the persisted investigation response." />}</div>}
+          {tab === "Evidence" && <div className="result-list">{jobDetail.findings.some((finding) => hasEvidence(finding.evidence)) && jobDetail.findings.filter((finding) => hasEvidence(finding.evidence)).map((finding, index) => <article key={`evidence-${index}`} className="result-item"><h4>{finding.title}</h4><DisplayValue value={finding.evidence} /></article>)}{jobDetail.runs.map((run, index) => <article key={`run-evidence-${index}`} className="result-item"><h4>{run.kind} output</h4>{run.failures.map((failure, failureIndex) => <details key={failureIndex}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}{!run.failures.length && !run.output && <p className="muted">No execution evidence was recorded for this run.</p>}</article>)}{!jobDetail.findings.some((finding) => hasEvidence(finding.evidence)) && !jobDetail.runs.length && <EmptyResult title="No evidence recorded" text="Only repository and execution evidence returned by the backend is shown here." />}</div>}
+          {tab === "Execution" && <div className="result-list">{jobDetail.runs.length ? jobDetail.runs.map((run, index) => <article key={`${run.kind}-${index}`} className="execution-card"><div className="result-item-heading"><h4>{run.kind}</h4><span className={pillKind(run.passed === true ? "passed" : run.passed === false ? "failed" : run.status || "not_run")}>{run.passed === true ? "tests passed" : run.passed === false ? "tests failed" : run.status || "not run"}</span></div><dl className="execution-meta"><div><dt>Provider</dt><dd>{run.backend || "Not reported"}</dd></div><div><dt>Isolation</dt><dd>{run.isolation || "Not reported"}</dd></div><div><dt>Exit code</dt><dd>{run.exit_code ?? "Not reported"}</dd></div><div><dt>Duration</dt><dd>{run.duration_ms == null ? "Not reported" : `${run.duration_ms} ms`}</dd></div>{run.command && <div><dt>Command</dt><dd><code>{run.command}</code></dd></div>}</dl>{run.install_ok != null && <p className="hint">Dependency installation: {run.install_ok ? "completed" : "failed"}</p>}{run.install_log && <details><summary>Dependency installation output</summary><pre className="output">{run.install_log}</pre></details>}{run.output && <details open><summary>Captured execution output</summary><pre className="output">{run.output}</pre></details>}{run.truncated && <p className="truncation-note" role="status">The backend truncated this execution output.</p>}{run.failures.map((failure, i) => <details key={i}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}</article>) : <EmptyResult title="No execution run recorded" text="This investigation has no execution output. Static analysis does not imply that code was executed." />}</div>}
+          {tab === "Changes" && <div className="result-list">{appliedPatch && <article className="result-item patch-card"><div className="result-item-heading"><h4>Download patch</h4><span className={pillKind(patchVerified ? "verified" : "unverified")}>{patchVerified ? "verified" : "unverified"}</span></div><p className="hint">{patchVerified ? "Unified diff of the guarded patch for this investigation. Downloading saves the file and never modifies your repositories." : "Verification did not pass. This file is provided for inspection only; downloading saves the file and never modifies your repositories."}</p><p className="hint">{patchStatusNote(appliedPatch.status)}</p>{appliedPatch.files.length > 0 && <div><p className="eyebrow">AFFECTED FILES</p><ul className="affected-files">{appliedPatch.files.map((file, fileIndex) => <li key={fileIndex}><code>{file.file}</code></li>)}</ul></div>}<div className="patch-actions"><button type="button" className="btn btn-primary" onClick={() => void downloadPatch()} disabled={downloading}>{downloading ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}{downloading ? "Preparing\u2026" : downloadedName ? "Download again" : "Download .patch"}</button></div>{downloadedName && <p className="hint" role="status">Saved <code>{downloadedName}</code> to your browser’s download location.</p>}{downloadError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><p>{downloadError}</p></div></div>}<details className="howto"><summary>How to apply this patch</summary><Markdown text={patchHowTo(downloadedName ?? "reporescue-fix.patch", patchVerified)} />{!downloadedName && <p className="hint">The exact filename is shown after you download.</p>}</details></article>}{jobDetail.patches.length ? jobDetail.patches.map((patch, index) => <article key={index} className="result-item"><div className="result-item-heading"><h4>Patch proposal {index + 1}</h4><span className={pillKind(patch.status)}>{patch.status}</span></div>{patch.reason && <p>{patch.reason}</p>}{patch.files.map((file, fileIndex) => <div key={fileIndex} className="diff-block"><div className="file-tab"><FileCode2 size={14} /><code>{file.file}</code></div><pre className="diff removed">{file.before || "No before content returned"}</pre><pre className="diff added">{file.after || "No after content returned"}</pre></div>)}<p className="hint">{patchStatusNote(patch.status)}</p><p className="hint">{jobDetail.verification_status === "passed" ? "The backend reports passing verification for this investigation." : `Verification is ${jobDetail.verification_status}; this patch has not been confirmed as a fix.`}</p></article>) : <EmptyResult title="No patch returned" text="The backend has not recorded a proposed change for this investigation." />}</div>}
+          {tab === "Conversation" && <div className="conversation-history"><p className="hint">Persisted conversation history from the investigation response. Sending follow-up messages is not available on the current backend contract.</p>{jobDetail.messages.length ? jobDetail.messages.map((message, index) => <article className={`message-entry ${message.role}`} key={`${index}-${message.role}`}><span>{message.role}</span><div className="message-text"><Markdown text={message.content} /></div></article>) : <EmptyResult title="No conversation messages" text="The investigation detail currently contains no persisted messages." />}</div>}
+        </div>
+      </section>}
+
       <div className="workbench-start-grid">
-      <div className="workbench-setup-main">
+      <details
+        className="workbench-setup-main setup-disclosure"
+        open={setupOpen}
+        onToggle={(event) => setSetupOpen(event.currentTarget.open)}
+      >
+      <summary><strong>Start a new investigation</strong><small>Repository, mode, and objective</small></summary>
       <section className="surface-section investigation-setup" aria-labelledby="setup-title">
         <div className="section-heading"><div><p className="eyebrow">NEW INVESTIGATION</p><h3 id="setup-title">Choose a repository and objective</h3></div><FolderGit2 size={20} /></div>
         <div className="setup-fields">
@@ -303,38 +417,86 @@ export default function WorkbenchView({
 
       {ingestResult && <section className="card mode-panel" aria-labelledby="mode-title">
         <div className="section-heading"><div><p className="eyebrow">INVESTIGATION MODE</p><h3 id="mode-title">What should RepoRescue do?</h3></div></div>
-        <div className="mode-grid" role="radiogroup" aria-label="Investigation mode">{MODES.map(({ id, title, description, icon: Icon }, index) => <button key={id} type="button" role="radio" tabIndex={mode === id ? 0 : -1} aria-checked={mode === id} className={`mode-card${mode === id ? " selected" : ""}`} onKeyDown={(event) => { if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1; const next = MODES[(index + step + MODES.length) % MODES.length]; setMode(next.id); setInvestError(""); } }} onClick={() => { setMode(id); setInvestError(""); }}><Icon size={18} /><span><strong>{title}</strong><small>{description}</small></span>{id === "general" && <span className="mode-default">DEFAULT</span>}</button>)}</div>
-        <div className="field objective-field"><label className="label" htmlFor="investigation-objective">Problem statement or objective</label><textarea id="investigation-objective" className="input objective-input" rows={3} maxLength={2000} placeholder={mode === "debug" ? "Describe the failure, expected behavior, and any useful context…" : mode === "explain" ? "What part of the repository should be explained?" : mode === "health" ? "Which health concerns should be assessed?" : "Describe what you want to understand or investigate…"} value={userMessage} onChange={(event) => setUserMessage(event.target.value)} /></div>
+        <div className="mode-grid" role="radiogroup" aria-label="Investigation mode">{MODES.map(({ id, title, description, icon: Icon }, index) => <button key={id} type="button" role="radio" tabIndex={mode === id ? 0 : -1} aria-checked={mode === id} className={`mode-card${mode === id ? " selected" : ""}`} onKeyDown={(event) => { if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1; const next = MODES[(index + step + MODES.length) % MODES.length]; setMode(next.id); setInvestError(""); setClassification(null); } }} onClick={() => { setMode(id); setInvestError(""); setClassification(null); }}><Icon size={18} /><span><strong>{title}</strong><small>{description}</small></span>{id === "general" && <span className="mode-default">DEFAULT</span>}</button>)}</div>
+        <div className="field objective-field"><label className="label" htmlFor="investigation-objective">Problem statement or objective</label><textarea id="investigation-objective" className="input objective-input" rows={3} maxLength={2000} placeholder={mode === "debug" ? "Describe the failure, expected behavior, and any useful context…" : mode === "explain" ? "What part of the repository should be explained?" : mode === "health" ? "Which health concerns should be assessed?" : "Describe what you want to understand or investigate…"} value={userMessage} onChange={(event) => { setUserMessage(event.target.value); setClassification(null); }} /></div>
+        {classifying && <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Classifying the objective…</div>}
+        {classification && !classification.selected_mode && <div role="alert" className="banner banner-warning"><CircleHelp size={17} /><div><strong>Objective needs clarification</strong><p>{classification.question ?? classification.rationale}</p><p className="hint">Refine the objective above and press Start again. The repository selection is preserved.</p></div></div>}
+        {classification && classification.selected_mode && <div className="routing-note" role="status"><p className="eyebrow">GENERAL ROUTING</p><strong>Will run: {classification.selected_mode}</strong><p>{classification.rationale}</p><span>Routing confidence: {classification.confidence} · {classification.source}</span></div>}
         <div className="setup-actions"><p className="hint">Inspection pins this repository snapshot. The queued job uses that snapshot and remains available after refresh.</p><button type="button" className="btn btn-primary" onClick={() => void startInvestigation()} disabled={investLoading}>{investLoading ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}{investLoading ? "Starting…" : "Start investigation"}</button></div>
         {!ingestResult.profile.supported && <p className="capability-note" role="status">The API marked this repository as outside the currently supported execution profile. The backend determines whether the selected analysis can proceed.</p>}
         {investError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><strong>Investigation not started</strong><p>{investError}</p></div></div>}
       </section>}
 
-      </div>
+      </details>
       <aside className="recent-section history-rail" aria-labelledby="history-title">
         <div className="section-heading"><div><p className="eyebrow">SAVED WORK</p><h3 id="history-title">Recent investigations</h3></div></div>
         {recentLoading ? <div className="loading-block" role="status"><LoaderCircle size={16} className="spin" /> Loading investigations…</div> : recentJobs.length > 0 ? <div className="recent-list">{recentJobs.map((job) => <button key={job.job_id} type="button" className={`recent-item${job.job_id === jobId ? " recent-active" : ""}`} onClick={() => void openJob(job.job_id)}><span className="recent-repo">{job.repo_name}</span><span className="recent-meta">{job.mode} · {job.status}</span><span className="recent-progress">{job.progress_pct}% reported</span></button>)}</div> : <div className="history-empty"><FolderGit2 size={19} /><p>Persisted investigations will appear here.</p></div>}
       </aside>
       </div>
-
-      {(jobError || adopting) && <div className={jobError ? "banner banner-error" : "banner banner-info"} role={jobError ? "alert" : "status"}>{jobError ? <AlertTriangle size={17} /> : <LoaderCircle size={17} className="spin" />}<div>{jobError || "Restoring your active investigation…"}</div>{jobError && <button type="button" className="btn btn-secondary btn-sm" onClick={() => jobId ? void openJob(jobId) : pendingJobId ? void openJob(pendingJobId) : restoredJobId ? void openJob(restoredJobId) : void refreshRecent()}>Retry</button>}</div>}
-
-      {jobDetail && <section className="card workbench-results" aria-label="Investigation results">
-        <header className="investigation-header"><div><p className="eyebrow">{jobDetail.mode === "general" && jobDetail.selected_mode ? `GENERAL \u2192 ${jobDetail.selected_mode.toUpperCase()} INVESTIGATION` : `${jobDetail.mode.toUpperCase()} INVESTIGATION`}</p><h3>{jobDetail.repo_name}</h3><p className="investigation-objective">{jobDetail.user_message || "No objective was recorded for this investigation."}</p><div className="context-meta"><span>Revision <code>{jobDetail.commit_sha.slice(0, 7)}</code></span>{jobDetail.ref && <span>Ref {jobDetail.ref}</span>}<span>Job {jobDetail.job?.job_id.slice(0, 8)}</span></div></div><div className="investigation-actions"><span className={pillKind(jobDetail.status)}>{jobDetail.status.toUpperCase()}</span>{active && <button type="button" className="btn btn-secondary btn-sm" onClick={() => void stopJob()} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel investigation"}</button>}</div></header>
-        {active && <div className="job-progress"><div className="progress-label"><span>{jobDetail.stage || jobDetail.status}</span><span>{jobDetail.progress_pct}% reported by API</span></div><progress value={jobDetail.progress_pct} max={100} aria-label={`Investigation progress ${jobDetail.progress_pct}%`} /></div>}
-        {jobDetail.error && <div className="banner banner-error" role="status"><AlertTriangle size={17} /><div><strong>{jobDetail.error.reason}</strong><p>{jobDetail.error.message}</p></div></div>}
-        <div className="workbench-tabs" role="tablist" aria-label="Investigation details" onKeyDown={(event) => { if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return; event.preventDefault(); const current = TABS.indexOf(tab); const next = event.key === "Home" ? 0 : event.key === "End" ? TABS.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length; setTab(TABS[next]); document.getElementById(`tab-${TABS[next].toLowerCase()}`)?.focus(); }}>{TABS.map((item) => <button key={item} id={`tab-${item.toLowerCase()}`} type="button" role="tab" tabIndex={tab === item ? 0 : -1} aria-selected={tab === item} aria-controls="workbench-panel" className={`workbench-tab${tab === item ? " active" : ""}`} onClick={() => setTab(item)}>{item}{item === "Findings" && <span>{jobDetail.findings.length}</span>}</button>)}</div>
-        <div id="workbench-panel" role="tabpanel" aria-labelledby={`tab-${tab.toLowerCase()}`} className="workbench-panel">
-          {tab === "Overview" && <div className="overview-grid"><div className="overview-summary"><p className="eyebrow">INVESTIGATION SUMMARY</p>{summary ? <p>{summary}</p> : diagnosis ? <p>{diagnosis}</p> : <p className="muted">The backend has not returned a final assessment yet.</p>}{jobDetail.limitations.length > 0 && <ul className="limitation-list">{jobDetail.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}</div><div className="overview-facts"><div><span>Stage</span><strong>{jobDetail.stage || "Not reported"}</strong></div><div><span>Verification</span><strong className={pillKind(jobDetail.verification_status)}>{jobDetail.verification_status}</strong></div><div><span>Execution runs</span><strong>{jobDetail.runs.length}</strong></div><div><span>Proposed patches</span><strong>{jobDetail.patches.length}</strong></div></div>{jobDetail.routing && <div className="routing-note"><p className="eyebrow">GENERAL ROUTING</p><strong>Selected analysis: {jobDetail.routing.selected_mode}</strong><p>{jobDetail.routing.rationale}</p><span>Routing confidence: {jobDetail.routing.confidence}</span></div>}{diagnosis && summary && <div className="assessment-note"><ZapIcon /><div><strong>AI assessment</strong><p>{diagnosis}</p></div></div>}</div>}
-          {tab === "Findings" && <div className="result-list">{jobDetail.findings.length ? jobDetail.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className="result-item"><div className="result-item-heading"><span className={pillKind(finding.kind)}>{finding.kind}</span>{finding.category && <span className="muted">{finding.category}</span>}<span className="confidence">{finding.confidence} confidence</span></div><h4>{finding.title}</h4>{finding.detail && <p>{finding.detail}</p>}{finding.evidence != null && <details><summary>Inspect finding evidence</summary><DisplayValue value={finding.evidence} /></details>}</article>) : <EmptyResult title="No findings returned" text="Findings will appear here when they are present in the persisted investigation response." />}</div>}
-          {tab === "Evidence" && <div className="result-list">{jobDetail.findings.some((finding) => finding.evidence != null) && jobDetail.findings.filter((finding) => finding.evidence != null).map((finding, index) => <article key={`evidence-${index}`} className="result-item"><h4>{finding.title}</h4><DisplayValue value={finding.evidence} /></article>)}{jobDetail.runs.map((run, index) => <article key={`run-evidence-${index}`} className="result-item"><h4>{run.kind} output</h4>{run.failures.map((failure, failureIndex) => <details key={failureIndex}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}{!run.failures.length && !run.output && <p className="muted">No execution evidence was recorded for this run.</p>}</article>)}{!jobDetail.findings.some((finding) => finding.evidence != null) && !jobDetail.runs.length && <EmptyResult title="No evidence recorded" text="Only repository and execution evidence returned by the backend is shown here." />}</div>}
-          {tab === "Execution" && <div className="result-list">{jobDetail.runs.length ? jobDetail.runs.map((run, index) => <article key={`${run.kind}-${index}`} className="execution-card"><div className="result-item-heading"><h4>{run.kind}</h4><span className={pillKind(run.passed === true ? "passed" : run.passed === false ? "failed" : run.status || "not_run")}>{run.passed === true ? "tests passed" : run.passed === false ? "tests failed" : run.status || "not run"}</span></div><dl className="execution-meta"><div><dt>Provider</dt><dd>{run.backend || "Not reported"}</dd></div><div><dt>Isolation</dt><dd>{run.isolation || "Not reported"}</dd></div><div><dt>Exit code</dt><dd>{run.exit_code ?? "Not reported"}</dd></div><div><dt>Duration</dt><dd>{run.duration_ms == null ? "Not reported" : `${run.duration_ms} ms`}</dd></div></dl>{run.install_ok != null && <p className="hint">Dependency installation: {run.install_ok ? "completed" : "failed"}</p>}{run.install_log && <details><summary>Dependency installation output</summary><pre className="output">{run.install_log}</pre></details>}{run.output && <details open><summary>Captured execution output</summary><pre className="output">{run.output}</pre></details>}{run.truncated && <p className="truncation-note" role="status">The backend truncated this execution output.</p>}{run.failures.map((failure, i) => <details key={i}><summary>{failure.test} · {failure.kind}</summary><pre className="output">{`${failure.message}\n${failure.traceback}`}</pre></details>)}</article>) : <EmptyResult title="No execution run recorded" text="This investigation has no execution output. Static analysis does not imply that code was executed." />}</div>}
-          {tab === "Changes" && <div className="result-list">{jobDetail.patches.some((patch) => patch.status === "applied") && <article className="result-item"><div className="result-item-heading"><h4>Guarded patch file</h4><span className={pillKind(jobDetail.verification_status === "passed" ? "verified" : "unverified")}>{jobDetail.verification_status === "passed" ? "verified" : "unverified"}</span></div><p className="hint">{jobDetail.verification_status === "passed" ? "Unified diff of the guarded patch for this investigation. Downloading does not apply it." : "Verification did not pass. This file is provided for inspection only; downloading does not apply it."}</p><button type="button" className="btn btn-secondary btn-sm" onClick={() => void downloadPatch()} disabled={downloading}>{downloading ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{downloading ? "Preparing\u2026" : "Download .patch"}</button>{downloadError && <div role="alert" className="banner banner-error"><AlertTriangle size={17} /><div><p>{downloadError}</p></div></div>}</article>}{jobDetail.patches.length ? jobDetail.patches.map((patch, index) => <article key={index} className="result-item"><div className="result-item-heading"><h4>Patch proposal {index + 1}</h4><span className={pillKind(patch.status)}>{patch.status}</span></div>{patch.reason && <p>{patch.reason}</p>}{patch.files.map((file, fileIndex) => <div key={fileIndex} className="diff-block"><div className="file-tab"><FileCode2 size={14} /><code>{file.file}</code></div><pre className="diff removed">{file.before || "No before content returned"}</pre><pre className="diff added">{file.after || "No after content returned"}</pre></div>)}<p className="hint">{jobDetail.verification_status === "passed" ? "The backend reports passing verification for this investigation." : `Verification is ${jobDetail.verification_status}; this patch has not been confirmed as a fix.`}</p></article>) : <EmptyResult title="No patch returned" text="The backend has not recorded a proposed change for this investigation." />}</div>}
-          {tab === "Conversation" && <div className="conversation-history"><p className="hint">Persisted conversation history from the investigation response. Sending follow-up messages is not available on the current backend contract.</p>{jobDetail.messages.length ? jobDetail.messages.map((message, index) => <article className={`message-entry ${message.role}`} key={`${index}-${message.role}`}><span>{message.role}</span><p>{message.content}</p></article>) : <EmptyResult title="No conversation messages" text="The investigation detail currently contains no persisted messages." />}</div>}
-        </div>
-      </section>}
     </div>
   );
+}
+
+/** True when backend evidence carries something worth inspecting ({}, null, and undefined hide the toggle). */
+function hasEvidence(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
+/** Honest one-line meaning of a patch lifecycle status. */
+function patchStatusNote(status: string): string {
+  switch (status) {
+    case "validated":
+      return "Guarded: verified to apply cleanly to the pinned revision; not executed.";
+    case "applied":
+      return "Applied in the isolated verification workspace only — never to your machine.";
+    default:
+      return "Proposed: suggested by the model, not applied anywhere.";
+  }
+}
+
+/** Markdown instructions for applying a unified diff by hand. */
+function patchHowTo(filename: string, verified: boolean): string {
+  return [
+    "Open a terminal at your repository root — the same project and revision the investigation inspected.",
+    "",
+    "1. Make sure the working tree is clean:",
+    "",
+    "```bash",
+    "git status",
+    "```",
+    "",
+    "2. Confirm the patch applies cleanly:",
+    "",
+    "```bash",
+    `git apply --check ${filename}`,
+    "```",
+    "",
+    "3. Apply it:",
+    "",
+    "```bash",
+    `git apply ${filename}`,
+    "```",
+    "",
+    "4. Review every change before committing:",
+    "",
+    "```bash",
+    "git diff",
+    "```",
+    "",
+    "To reverse an applied patch:",
+    "",
+    "```bash",
+    `git apply -R ${filename}`,
+    "```",
+    "",
+    verified
+      ? "This patch passed independent verification: the test suite was re-run with the patch applied in an isolated workspace. Review the diff before committing."
+      : "This patch did NOT pass verification — treat it as a suggestion, inspect every hunk, and run your test suite before committing.",
+    "",
+    "Downloading never modifies your repositories.",
+  ].join("\n");
 }
 
 function ZapIcon() { return <Activity size={18} aria-hidden="true" />; }

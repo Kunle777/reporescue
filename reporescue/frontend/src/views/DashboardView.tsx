@@ -29,7 +29,7 @@ function statusClass(status: string) {
 }
 
 export default function DashboardView({
-  userEmail,
+  username,
   projects,
   loading,
   error,
@@ -40,7 +40,7 @@ export default function DashboardView({
   onUnauthorized,
   onOpenInvestigation,
 }: {
-  userEmail: string | null;
+  username: string | null;
   projects: Project[];
   loading: boolean;
   error: string;
@@ -85,7 +85,7 @@ export default function DashboardView({
     return () => { live = false; };
   }, [onUnauthorized]);
 
-  const firstName = userEmail?.split("@")[0] || "there";
+  const firstName = username || "there";
 
   return (
     <div className="view-stack dashboard-view">
