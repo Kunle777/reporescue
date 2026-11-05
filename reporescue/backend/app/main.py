@@ -378,59 +378,83 @@ def classify_general_route(
     body: ClassifyRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=16, max_length=128),
 ) -> dict[str, Any]:
-    """Classify a General objective without creating a job.
-
-    Deterministic keyword routing first; the model is consulted only
-    for objectives that are not already high-confidence, with the
-    deterministic outcome as the fallback. A vague objective returns
-    ``needs_clarification`` with a follow-up question instead of a
-    route: the frontend shows the question and lets the user refine
-    the objective before anything is queued.
-    """
-    check_rate_limit("classify", user)
-    text = (body.message or "").strip()
-    deterministic = route_objective(text)
-    signals = deterministic.get("signals", {})
-    if deterministic.get("selected_mode") and deterministic.get("confidence") == "high":
-        return {**deterministic, "source": "deterministic"}
-    # Classification only consumes quota when a Meta call is actually configured
-    # and the deterministic route was not already decisive.
-    model_ready = False
-    try:
-        model_ready = (
-            meta_client_module.get_ai_mode() == "meta"
-            and bool(meta_client_module.get_api_key())
+    """Classify a General objective, caching repeat requests by idempotency key."""
+    request_record: IdempotencyRecord | None = None
+    if isinstance(idempotency_key, str) and idempotency_key:
+        profiles_module.get_or_create_profile(
+            db, user_id=user.id, username=username_attempt_from_claims(user.claims)
         )
-    except meta_client_module.MetaConfigError:
-        model_ready = False
-    if model_ready and isinstance(db, Session):
-        # Routing is part of the upcoming user operation: count its provider
-        # call globally, while the investigation itself consumes the user's
-        # single daily AI-operation allowance.
-        _reserve_ai_usage(db, user, global_only=True)
-    model = _try_model_classification(text)
-    if model is not None and model.get("selected_mode"):
-        return {
-            "selected_mode": model["selected_mode"],
-            "rationale": model["rationale"],
-            "confidence": model["confidence"],
-            "signals": signals,
-            "secondary_intents": deterministic.get("secondary_intents", []),
-            "source": "model",
-        }
-    if model is not None:
-        return {
-            "selected_mode": None,
-            "reason": "needs_clarification",
-            "question": model["question"],
-            "rationale": model["rationale"],
-            "confidence": "none",
-            "signals": signals,
-            "suggested_mode": deterministic.get("suggested_mode"),
-            "source": "model",
-        }
-    return {**deterministic, "source": "deterministic"}
+        request_record, cached = _begin_idempotent_request(
+            db,
+            owner_id=user.id,
+            scope="general_classify",
+            request_key=idempotency_key,
+            payload={"message": body.message.strip()},
+        )
+        if cached is not None:
+            return cached
+
+    try:
+        check_rate_limit("classify", user)
+        text = (body.message or "").strip()
+        deterministic = route_objective(text)
+        signals = deterministic.get("signals", {})
+        if (
+            deterministic.get("selected_mode")
+            and deterministic.get("confidence") == "high"
+        ):
+            response = {**deterministic, "source": "deterministic"}
+        else:
+            model_ready = False
+            try:
+                model_ready = (
+                    meta_client_module.get_ai_mode() == "meta"
+                    and bool(meta_client_module.get_api_key())
+                )
+            except meta_client_module.MetaConfigError:
+                model_ready = False
+
+            if model_ready:
+                # Classification is a distinct provider request but not a
+                # second user operation. The final investigation is charged
+                # once by POST /api/jobs.
+                _reserve_ai_usage(
+                    db, user, global_only=True, commit=request_record is None
+                )
+            model = _try_model_classification(text)
+            if model is not None and model.get("selected_mode"):
+                response = {
+                    "selected_mode": model["selected_mode"],
+                    "rationale": model["rationale"],
+                    "confidence": model["confidence"],
+                    "signals": signals,
+                    "secondary_intents": deterministic.get("secondary_intents", []),
+                    "source": "model",
+                }
+            elif model is not None:
+                response = {
+                    "selected_mode": None,
+                    "reason": "needs_clarification",
+                    "question": model["question"],
+                    "rationale": model["rationale"],
+                    "confidence": "none",
+                    "signals": signals,
+                    "suggested_mode": deterministic.get("suggested_mode"),
+                    "source": "model",
+                }
+            else:
+                response = {**deterministic, "source": "deterministic"}
+
+        if request_record is not None:
+            _complete_idempotent_request(request_record, response)
+            db.commit()
+        return response
+    except Exception:
+        if request_record is not None:
+            db.rollback()
+        raise
 
 
 @app.post("/api/repos/ingest")
