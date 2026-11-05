@@ -63,6 +63,7 @@ from .models import (
     IdempotencyRecord,
     Investigation,
     InvestigationMessage,
+    InvestigationAttempt,
     Patch,
     PatchFile,
 )
