@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -601,40 +601,56 @@ def create_job_route(
     body: JobCreate,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
 ) -> dict[str, Any]:
-    """Enqueue a persistent background investigation.
+    """Enqueue one persistent investigation; repeat keys return the same job."""
+    # Direct Python callers in the isolated unit tests do not pass FastAPI
+    # headers. HTTP requests must provide the key; the fallback only keeps
+    # direct function invocation backwards-compatible.
+    if not isinstance(idempotency_key, str):
+        idempotency_key = uuid4().hex
 
-    Snapshots the repository coordinates from the owned ingestion record;
-    the worker re-ingests from the pinned SHA, so execution never depends
-    on the API process's in-memory store.
-    """
-    check_rate_limit("jobs", user)
-    record = _resolve_record(body.ingestion_id, user, db)
-    if record.get("status") != "complete":
-        raise HTTPException(
-            status_code=422,
-            detail="Ingestion record is no longer available; inspect the repository again.",
-        )
-    if body.project_id is not None:
-        project = projects_module.get_project(
-            db, owner_id=user.id, project_id=body.project_id
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Not found.")
     profiles_module.get_or_create_profile(
         db, user_id=user.id, username=username_attempt_from_claims(user.claims)
     )
-    profile = record["profile"]
-    preselect = body.mode == "general"
-    inferred_mode = body.selected_mode
-    if preselect and inferred_mode is None:
-        inferred_mode = route_objective(body.message).get("selected_mode")
-    if body.mode != "general" or inferred_mode is not None:
-        _reserve_ai_usage(
-            db, user,
-            debug=_is_container_backed_debug(record, inferred_mode or body.mode),
-        )
+    request_record, cached = _begin_idempotent_request(
+        db,
+        owner_id=user.id,
+        scope="create_investigation",
+        request_key=idempotency_key,
+        payload=body.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached
+
     try:
+        check_rate_limit("jobs", user)
+        record = _resolve_record(body.ingestion_id, user, db)
+        if record.get("status") != "complete":
+            raise HTTPException(
+                status_code=422,
+                detail="Ingestion record is no longer available; inspect the repository again.",
+            )
+        if body.project_id is not None:
+            project = projects_module.get_project(
+                db, owner_id=user.id, project_id=body.project_id
+            )
+            if project is None:
+                raise HTTPException(status_code=404, detail="Not found.")
+
+        profile = record["profile"]
+        preselect = body.mode == "general"
+        inferred_mode = body.selected_mode
+        if preselect and inferred_mode is None:
+            inferred_mode = route_objective(body.message).get("selected_mode")
+        if body.mode != "general" or inferred_mode is not None:
+            _reserve_ai_usage(
+                db,
+                user,
+                debug=_is_container_backed_debug(record, inferred_mode or body.mode),
+                commit=False,
+            )
+
         investigation, job = jobqueue_module.create_investigation(
             db,
             owner_id=user.id,
@@ -650,14 +666,22 @@ def create_job_route(
             preselect_rationale=body.routing_rationale if preselect else None,
             preselect_confidence=body.routing_confidence if preselect else None,
             preselect_source=body.routing_source if preselect else None,
+            commit=False,
         )
+        response = {
+            "job_id": str(job.id),
+            "investigation_id": str(investigation.id),
+            "status": job.status,
+        }
+        _complete_idempotent_request(request_record, response)
+        db.commit()
+        return response
     except InvalidMode as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return {
-        "job_id": str(job.id),
-        "investigation_id": str(investigation.id),
-        "status": job.status,
-    }
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.get("/api/jobs/active")
