@@ -17,6 +17,7 @@ from .db import get_db
 from .general import route_objective
 from .github_ingest import IngestionError
 from .rate_limit import check_rate_limit
+from .usage_quota import UsageLimitExceeded, reserve_global_call, reserve_operation, usage_status
 from .ingestion import (
     get_ingestion,
     get_ingestion_owner,
@@ -200,14 +201,64 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API"}
 
 
+def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None) -> bool:
+    """Apply the Debug allowance only when this request can reach a container."""
+    if selected_mode != "debug":
+        return False
+    profile = record.get("profile") if isinstance(record, dict) else None
+    capabilities = profile.get("capabilities", {}) if isinstance(profile, dict) else {}
+    runnable = capabilities.get("runnable", {}) if isinstance(capabilities, dict) else {}
+    if not isinstance(runnable, dict) or not runnable.get("python"):
+        return False
+    try:
+        return config.get_execution_backend() in ("auto", "modal", "docker")
+    except config.ConfigError:
+        return False
+
+
+def _reserve_ai_usage(db: Session, user: AuthenticatedUser, *, debug: bool = False, global_only: bool = False) -> None:
+    """Reserve quota before accepting work that can spend Meta API credits."""
+    try:
+        if global_only:
+            reserve_global_call(db)
+        else:
+            reserve_operation(db, user_id=str(user.id), include_debug=debug)
+    except UsageLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": exc.code,
+                "limit": exc.limit,
+                "timezone": "Africa/Lagos",
+                "resets_at": exc.reset_at.isoformat(),
+            },
+            headers={"Retry-After": str(max(1, int((exc.reset_at - datetime.now(exc.reset_at.tzinfo)).total_seconds())))},
+        ) from exc
+
+
+@app.get("/api/usage/quota")
+def get_usage_quota(
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the authenticated user's daily AI and Debug allowances."""
+    return usage_status(db, user_id=str(user.id))
+
+
 @app.post("/api/demo/investigate")
 def investigate(
     request: InvestigationRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Fixture-only demo investigation. Authenticated: in meta AI mode
     this endpoint spends API quota, so anonymous callers are rejected."""
     check_rate_limit("demo", user)
+    try:
+        if meta_client_module.get_ai_mode() == "meta" and isinstance(db, Session):
+            _reserve_ai_usage(db, user)
+    except meta_client_module.MetaConfigError:
+        pass
     return run_investigation(request.scenario)
 
 
@@ -240,6 +291,7 @@ def _try_model_classification(text: str) -> dict[str, Any] | None:
 def classify_general_route(
     body: ClassifyRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Classify a General objective without creating a job.
 
@@ -256,6 +308,21 @@ def classify_general_route(
     signals = deterministic.get("signals", {})
     if deterministic.get("selected_mode") and deterministic.get("confidence") == "high":
         return {**deterministic, "source": "deterministic"}
+    # Classification only consumes quota when a Meta call is actually configured
+    # and the deterministic route was not already decisive.
+    model_ready = False
+    try:
+        model_ready = (
+            meta_client_module.get_ai_mode() == "meta"
+            and bool(meta_client_module.get_api_key())
+        )
+    except meta_client_module.MetaConfigError:
+        model_ready = False
+    if model_ready and isinstance(db, Session):
+        # Routing is part of the upcoming user operation: count its provider
+        # call globally, while the investigation itself consumes the user's
+        # single daily AI-operation allowance.
+        _reserve_ai_usage(db, user, global_only=True)
     model = _try_model_classification(text)
     if model is not None and model.get("selected_mode"):
         return {
@@ -263,6 +330,7 @@ def classify_general_route(
             "rationale": model["rationale"],
             "confidence": model["confidence"],
             "signals": signals,
+            "secondary_intents": deterministic.get("secondary_intents", []),
             "source": "model",
         }
     if model is not None:
@@ -339,6 +407,14 @@ def start_real_investigation(
         if exc.reason == "not_owner":
             raise HTTPException(status_code=404, detail="Not found.")
         return _sync_error(request.mode, record, exc.reason, str(exc))
+    effective_mode = request.selected_mode
+    if request.mode == "general" and effective_mode is None:
+        effective_mode = route_objective(request.message).get("selected_mode")
+    if request.mode != "general" or effective_mode is not None:
+        _reserve_ai_usage(
+            db, user,
+            debug=_is_container_backed_debug(record, effective_mode or request.mode),
+        )
     result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
     if result.status == "complete":
         assert result.report is not None
@@ -440,6 +516,14 @@ def create_job_route(
     )
     profile = record["profile"]
     preselect = body.mode == "general"
+    inferred_mode = body.selected_mode
+    if preselect and inferred_mode is None:
+        inferred_mode = route_objective(body.message).get("selected_mode")
+    if body.mode != "general" or inferred_mode is not None:
+        _reserve_ai_usage(
+            db, user,
+            debug=_is_container_backed_debug(record, inferred_mode or body.mode),
+        )
     try:
         investigation, job = jobqueue_module.create_investigation(
             db,

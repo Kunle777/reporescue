@@ -94,6 +94,16 @@ EXPLAIN_SIGNALS = (
     "guide",
     "tutorial*",
     "example*",
+    "cloud setup",
+    "cloud infrastructure",
+    "container",
+    "containers",
+    "docker",
+    "modal",
+    "deploy*",
+    "deployment*",
+    "hosting",
+    "runtime",
 )
 
 HEALTH_SIGNALS = (
@@ -114,6 +124,10 @@ HEALTH_SIGNALS = (
     "code smell",
     "smell",
     "debt",
+    "rate*",
+    "rating*",
+    "score*",
+    "out of 10",
 )
 
 # Generic intent words: matching ONLY one of these (and nothing else)
@@ -291,12 +305,23 @@ def route_objective(
             f"Objective matched {selected} signals "
             f"({', '.join(signals[selected])}); General selected {selected}."
         )
-    return {
+    secondary_intents = [
+        mode for mode in _TIE_PRIORITY
+        if mode != selected and scores[mode] > 0
+    ]
+    result = {
         "selected_mode": selected,
         "rationale": rationale,
         "confidence": confidence,
         "signals": signals,
     }
+    if secondary_intents:
+        result["secondary_intents"] = secondary_intents
+        result["rationale"] += (
+            f" Additional intent detected: {', '.join(secondary_intents)}; "
+            "this investigation runs the primary mode only."
+        )
+    return result
 
 
 def _unroutable(ctx: Any, routing: dict[str, Any], reason: str, message: str) -> Any:
@@ -343,6 +368,9 @@ def _preselected_routing(ctx: Any) -> dict[str, Any] | None:
         "rationale": str(rationale),
         "confidence": confidence,
         "signals": _all_signal_matches(ctx.message or ""),
+        "secondary_intents": route_objective(ctx.message, ctx.capabilities).get(
+            "secondary_intents", []
+        ),
         "source": str(source),
     }
 

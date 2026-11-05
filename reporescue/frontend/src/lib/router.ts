@@ -4,6 +4,8 @@ export type Route = {
   view: View;
   /** Selected investigation job id (workbench only, else null). */
   jobId: string | null;
+  /** Explicit creation route; must never be replaced by active-job restore. */
+  newInvestigation?: boolean;
 };
 
 const VIEWS: View[] = ["dashboard", "projects", "workbench", "settings"];
@@ -13,6 +15,9 @@ export function parseHash(hash: string): Route {
   const clean = hash.startsWith("#") ? hash.slice(1) : hash;
   const parts = clean.split("/").filter(Boolean);
   const [head, ...rest] = parts;
+  if (head === "workbench" && rest[0] === "new") {
+    return { view: "workbench", jobId: null, newInvestigation: true };
+  }
   if (head === "workbench" && rest[0] === "job" && rest[1]) {
     return { view: "workbench", jobId: decodeURIComponent(rest[1]) };
   }
@@ -24,6 +29,9 @@ export function parseHash(hash: string): Route {
 
 /** Build the canonical hash for a route (deep-linkable, refresh-safe). */
 export function buildHash(route: Route): string {
+  if (route.view === "workbench" && route.newInvestigation) {
+    return "#/workbench/new";
+  }
   if (route.view === "workbench" && route.jobId) {
     return `#/workbench/job/${encodeURIComponent(route.jobId)}`;
   }

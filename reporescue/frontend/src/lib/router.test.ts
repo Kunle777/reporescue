@@ -13,6 +13,17 @@ describe("hash router", () => {
     expect(parseHash("#/settings")).toEqual({ view: "settings", jobId: null });
   });
 
+  it("parses and builds the explicit new-investigation route", () => {
+    expect(parseHash("#/workbench/new")).toEqual({
+      view: "workbench",
+      jobId: null,
+      newInvestigation: true,
+    });
+    expect(buildHash({ view: "workbench", jobId: null, newInvestigation: true })).toBe(
+      "#/workbench/new"
+    );
+  });
+
   it("parses an investigation deep link", () => {
     expect(parseHash("#/workbench/job/abc-123")).toEqual({
       view: "workbench",

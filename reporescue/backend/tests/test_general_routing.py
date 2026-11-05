@@ -728,3 +728,16 @@ def test_classify_stub_mode_never_calls_model(owner, monkeypatch):
     )
     assert result["reason"] == "needs_clarification"
     assert result["source"] == "deterministic"
+
+
+
+def test_cloud_container_explanation_preserves_rating_as_secondary_intent():
+    routing = route_objective(
+        "Explain the cloud setup where the container was being deployed "
+        "and rate the project out of 10."
+    )
+    assert routing["selected_mode"] == "explain"
+    assert "health" in routing["secondary_intents"]
+    assert "container" in routing["signals"]["explain"]
+    assert "out of 10" in routing["signals"]["health"]
+    assert "primary mode only" in routing["rationale"]
