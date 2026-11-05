@@ -7,6 +7,7 @@ export type Classification =
       rationale: string;
       confidence: string;
       signals: Record<string, string[]>;
+      secondary_intents?: InvestigationMode[];
       source: string;
     }
   | {
