@@ -231,10 +231,16 @@ def get_usage_quota(
 def investigate(
     request: InvestigationRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Fixture-only demo investigation. Authenticated: in meta AI mode
     this endpoint spends API quota, so anonymous callers are rejected."""
     check_rate_limit("demo", user)
+    try:
+        if meta_client_module.get_ai_mode() == "meta":
+            _reserve_ai_usage(db, user)
+    except meta_client_module.MetaConfigError:
+        pass
     return run_investigation(request.scenario)
 
 
