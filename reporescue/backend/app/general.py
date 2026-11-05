@@ -368,6 +368,9 @@ def _preselected_routing(ctx: Any) -> dict[str, Any] | None:
         "rationale": str(rationale),
         "confidence": confidence,
         "signals": _all_signal_matches(ctx.message or ""),
+        "secondary_intents": route_objective(ctx.message, ctx.capabilities).get(
+            "secondary_intents", []
+        ),
         "source": str(source),
     }
 
