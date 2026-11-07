@@ -885,7 +885,15 @@ def test_job_routes_ownership_and_detail(db, owner, other_owner):
     investigation, job = _create(db, owner, user_message="m")
     detail = main_module.get_job_route(job.id, _user(owner), db)
     assert detail["investigation_id"] == str(investigation.id)
-    assert detail["messages"] == [{"role": "user", "content": "m"}]
+    (message,) = detail["messages"]
+    assert set(message) == {
+        "id", "role", "content", "grounding_status", "evidence_ids", "created_at"
+    }
+    assert (message["role"], message["content"]) == ("user", "m")
+    assert message["grounding_status"] is None
+    assert message["evidence_ids"] == []
+    assert uuid.UUID(message["id"])
+    assert message["created_at"]
     assert detail["job"]["status"] == "queued"
     with pytest.raises(HTTPException) as exc_info:
         main_module.get_job_route(job.id, _user(other_owner), db)
