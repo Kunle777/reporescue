@@ -1,20 +1,34 @@
-"""Beta restriction: public GitHub repositories only.
+"""Beta restrictions: public repos only, Debug supports Python only.
 
-The backend must reject private repositories before cloning, executing,
-or sending context to the AI provider. A best-effort GitHub API
-pre-check rejects privately-visible repos without cloning; any API
+Public-only: the backend rejects private repositories before cloning,
+executing, or sending context to the AI provider. A best-effort GitHub
+API pre-check rejects privately-visible repos without cloning; any API
 anomaly fails open to the clone attempt, and clone-level "not found"
 maps to the same structured reason.
+
+Debug Python-only: Debug mode (direct or routed) is rejected for
+repositories without Python runtime evidence, before quota is touched.
+Other modes stay available for supported public repositories.
 """
 import io
 import json
+import shutil
 import urllib.error
 import urllib.request
+import uuid
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import Session
 
 from app import ingestion as ingestion_module
+from app import main as main_module
+from app.auth import AuthenticatedUser
 from app.github_ingest import IngestionError
+from app.ingestion import set_ingestion_owner
+from app.models import Base, Investigation, Profile
+from app.usage_quota import usage_status
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +156,135 @@ def test_clone_not_found_maps_to_private_reason(monkeypatch):
     assert record["status"] == "error"
     assert record["reason"] == "private_repo_not_supported"
     assert "public" in record["message"].lower()
+
+
+# --- Debug Python-only ---
+
+
+JS_PROJECT = {
+    "package.json": '{"name": "app", "version": "1.0.0"}\n',
+    "index.js": "console.log('hi');\n",
+}
+
+
+@pytest.fixture()
+def engine(tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path.as_posix()}/beta.db",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture()
+def db(engine):
+    with Session(engine) as session:
+        yield session
+
+
+@pytest.fixture()
+def owner(db):
+    profile = Profile(id=uuid.uuid4())
+    db.add(profile)
+    db.commit()
+    return profile.id
+
+
+@pytest.fixture()
+def js_dir(tmp_path):
+    project = tmp_path / "jsproj"
+    for rel, content in JS_PROJECT.items():
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return project
+
+
+def _user(owner):
+    return AuthenticatedUser(id=owner, email=None, claims={})
+
+
+def _ingest_owned(monkeypatch, source, owner, url="https://github.com/acme/repo"):
+    def fake_clone(clone_url, destination, ref=None):
+        shutil.copytree(source, destination)
+        return "e" * 40
+
+    monkeypatch.setattr(ingestion_module, "clone_and_pin", fake_clone)
+    record = ingestion_module.ingest_repository(url)
+    assert record["status"] == "complete"
+    set_ingestion_owner(record["ingestion_id"], str(owner))
+    return record
+
+
+def _job(db, owner, record, **kwargs):
+    params = {"ingestion_id": record["ingestion_id"], "mode": "debug"}
+    params.update(kwargs)
+    body = main_module.JobCreate(**params)
+    return main_module.create_job_route(body, _user(owner), db)
+
+
+def test_debug_on_javascript_rejected_without_quota(db, owner, monkeypatch, js_dir):
+    record = _ingest_owned(monkeypatch, js_dir, owner)
+    with pytest.raises(HTTPException) as exc_info:
+        _job(db, owner, record)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 0
+    assert db.scalars(select(Investigation)).all() == []
+
+
+def test_debug_on_python_accepted(db, owner, monkeypatch, project_dir):
+    record = _ingest_owned(monkeypatch, project_dir, owner)
+    result = _job(db, owner, record, message="fix it")
+    assert result["status"] == "queued"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 1
+
+
+def test_general_preselect_debug_on_javascript_rejected(db, owner, monkeypatch, js_dir):
+    record = _ingest_owned(monkeypatch, js_dir, owner)
+    with pytest.raises(HTTPException) as exc_info:
+        _job(db, owner, record, mode="general", message="fix it", selected_mode="debug")
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 0
+
+
+def test_general_routed_debug_on_javascript_rejected(db, owner, monkeypatch, js_dir):
+    record = _ingest_owned(monkeypatch, js_dir, owner)
+    with pytest.raises(HTTPException) as exc_info:
+        _job(
+            db,
+            owner,
+            record,
+            mode="general",
+            message="tests are failing with an assertion error, please fix the bug",
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 0
+
+
+def test_explain_on_javascript_accepted(db, owner, monkeypatch, js_dir):
+    record = _ingest_owned(monkeypatch, js_dir, owner)
+    result = _job(db, owner, record, mode="explain", message="explain this")
+    assert result["status"] == "queued"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 1
+
+
+def test_sync_debug_on_javascript_rejected(db, owner, monkeypatch, js_dir):
+    record = _ingest_owned(monkeypatch, js_dir, owner)
+    request = main_module.RealInvestigationRequest(
+        ingestion_id=record["ingestion_id"], mode="debug", message="fix it"
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        main_module.start_real_investigation(request, _user(owner), db)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 0

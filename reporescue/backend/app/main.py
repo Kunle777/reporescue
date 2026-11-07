@@ -237,6 +237,36 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "RepoRescue API"}
 
 
+def _require_debug_python(record: dict[str, Any], mode: str) -> None:
+    """Reject Debug mode for repositories that are not Python projects.
+
+    Language evidence comes from ingestion analysis (source files and
+    manifests), never from README text. Framework completeness is
+    not required here: Python projects without a supported test
+    framework are still served as static Debug by the pipeline.
+    Records without a usable profile are left to the normal
+    validation path; only positively-non-Python repos are rejected.
+    """
+    if mode != "debug":
+        return
+    profile = record.get("profile") if isinstance(record, dict) else None
+    if not isinstance(profile, dict):
+        return
+    if profile.get("supported"):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "DEBUG_PYTHON_ONLY",
+            "message": (
+                "Debug mode currently supports Python repositories only. "
+                "You can still use General, Explain, Health or Conversation "
+                "with supported public repositories."
+            ),
+        },
+    )
+
+
 def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None) -> bool:
     """Apply the Debug allowance only when this request can reach a container."""
     if selected_mode != "debug":
@@ -587,6 +617,10 @@ def start_real_investigation(
     uses; responses keep the exact historical per-mode shapes.
     """
     record = _resolve_record(request.ingestion_id, user, db)
+    effective_mode = request.selected_mode
+    if request.mode == "general" and effective_mode is None:
+        effective_mode = route_objective(request.message).get("selected_mode")
+    _require_debug_python(record, effective_mode or request.mode)
     try:
         ctx = build_context_from_record(
             record,
@@ -604,9 +638,6 @@ def start_real_investigation(
         if exc.reason == "not_owner":
             raise HTTPException(status_code=404, detail="Not found.")
         return _sync_error(request.mode, record, exc.reason, str(exc))
-    effective_mode = request.selected_mode
-    if request.mode == "general" and effective_mode is None:
-        effective_mode = route_objective(request.message).get("selected_mode")
     charged = request.mode != "general" or effective_mode is not None
     charged_debug = False
     if charged:
@@ -741,6 +772,7 @@ def create_job_route(
         inferred_mode = body.selected_mode
         if preselect and inferred_mode is None:
             inferred_mode = route_objective(body.message).get("selected_mode")
+        _require_debug_python(record, inferred_mode or body.mode)
         charged_ai = False
         charged_debug = False
         if body.mode != "general" or inferred_mode is not None:
