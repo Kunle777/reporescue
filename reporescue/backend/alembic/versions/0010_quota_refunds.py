@@ -24,6 +24,14 @@ def upgrade() -> None:
                 server_default=sa.false(),
             )
         )
+        batch_op.add_column(
+            sa.Column(
+                "quota_kind",
+                sa.String(length=20),
+                nullable=False,
+                server_default="user",
+            )
+        )
         batch_op.drop_constraint("ck_idempotency_status", type_="check")
         batch_op.create_check_constraint(
             "ck_idempotency_status",
@@ -60,4 +68,5 @@ def downgrade() -> None:
         batch_op.create_check_constraint(
             "ck_idempotency_status", "status IN ('processing', 'completed')"
         )
+        batch_op.drop_column("quota_kind")
         batch_op.drop_column("quota_refunded")

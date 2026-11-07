@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -24,7 +24,14 @@ from .general import route_objective
 from .github_ingest import IngestionError
 from .rate_limit import check_rate_limit
 from .redact import redact_text, sanitize_model_text
-from .usage_quota import UsageLimitExceeded, reserve_global_call, reserve_operation, usage_status
+from .usage_quota import (
+    UsageLimitExceeded,
+    release_global_call,
+    release_operation,
+    reserve_global_call,
+    reserve_operation,
+    usage_status,
+)
 from .ingestion import (
     get_ingestion,
     get_ingestion_owner,
@@ -288,6 +295,22 @@ def _request_fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# A 'processing' claim older than this cannot still be in flight (provider
+# calls time out after 60s), so a crash orphan is safe to reclaim: refund
+# its quota once and let the same key start a fresh attempt.
+IDEMPOTENCY_PROCESSING_TTL_SECONDS = 900
+
+
+def _processing_expired(record: IdempotencyRecord) -> bool:
+    updated = record.updated_at
+    if updated is None:
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - updated).total_seconds()
+    return age > IDEMPOTENCY_PROCESSING_TTL_SECONDS
+
+
 def _begin_idempotent_request(
     db: Session,
     *,
@@ -295,8 +318,14 @@ def _begin_idempotent_request(
     scope: str,
     request_key: str,
     payload: dict[str, Any],
+    quota_kind: str = "user",
 ) -> tuple[IdempotencyRecord | None, dict[str, Any] | None]:
-    """Create a unique request claim or return the exact cached response."""
+    """Create a unique request claim or return the exact cached response.
+
+    A 'failed' claim (or a stale 'processing' orphan) with the same
+    payload hash is reclaimed for a fresh attempt: outstanding quota is
+    refunded once and the caller reserves anew.
+    """
     fingerprint = _request_fingerprint(payload)
     record = IdempotencyRecord(
         owner_id=owner_id,
@@ -304,6 +333,8 @@ def _begin_idempotent_request(
         request_key=request_key,
         request_hash=fingerprint,
         status="processing",
+        quota_kind=quota_kind,
+        quota_refunded=False,
     )
     db.add(record)
     try:
@@ -330,6 +361,15 @@ def _begin_idempotent_request(
             })
         if existing.status == "completed" and isinstance(existing.response, dict):
             return None, existing.response
+        if existing.status == "failed" or (
+            existing.status == "processing" and _processing_expired(existing)
+        ):
+            _refund_claim_quota(db, owner_id, existing)
+            existing.status = "processing"
+            existing.quota_refunded = False
+            existing.quota_kind = quota_kind
+            db.flush()
+            return existing, None
         raise HTTPException(status_code=409, detail={
             "code": "REQUEST_ALREADY_PROCESSING",
             "message": "This request is already being processed. Wait or refresh before retrying.",
@@ -341,6 +381,33 @@ def _complete_idempotent_request(
 ) -> None:
     record.status = "completed"
     record.response = response
+
+
+def _refund_claim_quota(
+    db: Session, owner_id: UUID, record: IdempotencyRecord
+) -> None:
+    """Return a claim's reserved quota unless already refunded."""
+    if record.quota_refunded or record.quota_kind == "none":
+        return
+    if record.quota_kind == "global":
+        release_global_call(db, commit=False)
+    else:
+        release_operation(
+            db,
+            user_id=str(owner_id),
+            include_debug=(record.quota_kind == "user_debug"),
+            commit=False,
+        )
+
+
+def _fail_idempotent_request(
+    db: Session, *, owner_id: UUID, record: IdempotencyRecord
+) -> None:
+    """Mark a claim failed and refund its quota exactly once."""
+    record.status = "failed"
+    _refund_claim_quota(db, owner_id, record)
+    record.quota_refunded = True
+    db.commit()
 
 
 @app.post("/api/demo/investigate")
@@ -404,6 +471,7 @@ def classify_general_route(
             scope="general_classify",
             request_key=idempotency_key,
             payload={"message": body.message.strip()},
+            quota_kind="global",
         )
         if cached is not None:
             return cached
@@ -631,6 +699,7 @@ def create_job_route(
         scope="create_investigation",
         request_key=idempotency_key,
         payload=body.model_dump(mode="json"),
+        quota_kind="user",
     )
     if cached is not None:
         return cached
@@ -656,10 +725,12 @@ def create_job_route(
         if preselect and inferred_mode is None:
             inferred_mode = route_objective(body.message).get("selected_mode")
         if body.mode != "general" or inferred_mode is not None:
+            debug_charged = _is_container_backed_debug(record, inferred_mode or body.mode)
+            request_record.quota_kind = "user_debug" if debug_charged else "user"
             _reserve_ai_usage(
                 db,
                 user,
-                debug=_is_container_backed_debug(record, inferred_mode or body.mode),
+                debug=debug_charged,
                 commit=False,
             )
 
@@ -953,6 +1024,7 @@ def send_investigation_message(
         scope=f"conversation:{investigation_id}",
         request_key=idempotency_key,
         payload={"message": body.message.strip()},
+        quota_kind="user",
     )
     if cached is not None:
         return cached
@@ -980,65 +1052,90 @@ def send_investigation_message(
 
         context, history, allowed_evidence = _build_conversation_context(db, investigation)
         _reserve_ai_usage(db, user, commit=False)
-        user_message = InvestigationMessage(
-            investigation_id=investigation.id,
-            role="user",
-            content=body.message.strip(),
-        )
-        db.add(user_message)
-        # Persist the request claim, user message and quota reservation before
-        # the provider call. A retry with this key can never trigger a second
-        # model call while the original request is in progress.
+        # The claim and quota reservation commit before the provider call
+        # so a concurrent retry sees 'processing' instead of double
+        # calling. Messages persist only on success, so a failure leaves
+        # no orphan rows behind.
         db.commit()
-
-        try:
-            model_result = meta_client_module.conversation_reply(
-                context=context,
-                history=history,
-                question=_redact_conversation_text(body.message.strip(), 2000),
-                api_key=api_key,
-            )
-            returned_ids = model_result["evidence_ids"]
-            valid_ids = [item for item in returned_ids if item in allowed_evidence]
-            invalid_ids = [item for item in returned_ids if item not in allowed_evidence]
-            grounding_status = (
-                "citation_issue" if invalid_ids
-                else "verified" if valid_ids
-                else "unverified"
-            )
-            answer = sanitize_model_text(model_result["answer"])
-        except meta_client_module.MetaClientError:
-            answer = (
-                "I couldn't complete that response from the available investigation "
-                "evidence. No repository changes or commands were performed. "
-                "Please try again with a new message."
-            )
-            valid_ids = []
-            grounding_status = "unverified"
-
-        assistant_message = InvestigationMessage(
-            investigation_id=investigation.id,
-            role="assistant",
-            content=answer,
-            grounding_status=grounding_status,
-            evidence_ids=valid_ids,
-        )
-        db.add(assistant_message)
-        response = {
-            "user_message": {"role": "user", "content": user_message.content},
-            "assistant_message": {
-                "role": "assistant",
-                "content": answer,
-                "grounding_status": grounding_status,
-                "evidence_ids": valid_ids,
-            },
-        }
-        _complete_idempotent_request(request_record, response)
-        db.commit()
-        return response
     except Exception:
         db.rollback()
         raise
+
+    try:
+        model_result = meta_client_module.conversation_reply(
+            context=context,
+            history=history,
+            question=_redact_conversation_text(body.message.strip(), 2000),
+            api_key=api_key,
+        )
+        returned_ids = model_result["evidence_ids"]
+        valid_ids = [item for item in returned_ids if item in allowed_evidence]
+        invalid_ids = [item for item in returned_ids if item not in allowed_evidence]
+        grounding_status = (
+            "citation_issue" if invalid_ids
+            else "verified" if valid_ids
+            else "unverified"
+        )
+        answer = sanitize_model_text(model_result["answer"])
+    except meta_client_module.MetaRateLimitError as exc:
+        _fail_idempotent_request(db, owner_id=user.id, record=request_record)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "PROVIDER_RATE_LIMITED",
+                "message": (
+                    "The AI provider is rate limiting requests right now. "
+                    "Your daily AI allowance hasn't been used. Please try again."
+                ),
+            },
+        ) from exc
+    except meta_client_module.MetaClientError as exc:
+        _fail_idempotent_request(db, owner_id=user.id, record=request_record)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "PROVIDER_UNAVAILABLE",
+                "message": (
+                    "RepoRescue couldn't complete the AI request right now. "
+                    "Your daily AI allowance hasn't been used. Please try again."
+                ),
+            },
+        ) from exc
+    except Exception:
+        _fail_idempotent_request(db, owner_id=user.id, record=request_record)
+        raise
+
+    user_message = InvestigationMessage(
+        investigation_id=investigation.id,
+        role="user",
+        content=body.message.strip(),
+    )
+    assistant_message = InvestigationMessage(
+        investigation_id=investigation.id,
+        role="assistant",
+        content=answer,
+        grounding_status=grounding_status,
+        evidence_ids=valid_ids,
+    )
+    response = {
+        "user_message": {"role": "user", "content": user_message.content},
+        "assistant_message": {
+            "role": "assistant",
+            "content": answer,
+            "grounding_status": grounding_status,
+            "evidence_ids": valid_ids,
+        },
+    }
+    try:
+        db.add(user_message)
+        db.add(assistant_message)
+        _complete_idempotent_request(request_record, response)
+        db.commit()
+    except Exception:
+        db.rollback()
+        _fail_idempotent_request(db, owner_id=user.id, record=request_record)
+        raise
+    return response
 
 
 @app.get("/api/investigations/{investigation_id}/patch")

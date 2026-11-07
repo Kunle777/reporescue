@@ -453,6 +453,9 @@ class IdempotencyRecord(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="processing")
     response: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     quota_refunded: Mapped[bool] = mapped_column(nullable=False, default=False)
+    # What this claim reserved: 'none', 'global', 'user', 'user_debug'.
+    # Records what a stale-claim reclaim must refund.
+    quota_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

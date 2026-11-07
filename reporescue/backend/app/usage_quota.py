@@ -99,6 +99,18 @@ def reserve_global_call(db: Session, *, commit: bool = True) -> None:
         raise
 
 
+def release_global_call(db: Session, *, commit: bool = True) -> None:
+    """Return one shared application-wide slot (mirror of reserve)."""
+    day, _ = _today_and_reset()
+    try:
+        _release_counter(db, scope="__global__", day=day, kind="ai")
+        if commit:
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def reserve_operation(
     db: Session, *, user_id: str, include_debug: bool = False, commit: bool = True
 ) -> None:
