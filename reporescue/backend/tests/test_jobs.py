@@ -1009,3 +1009,27 @@ def test_explain_and_health_emit_progress(monkeypatch, project_dir):
     )
     stages = [call[1] for call in progress.calls if call[0] == "completed"]
     assert stages == ["checks", "summarize"]
+
+
+def test_worker_logs_model_not_found_with_phase(
+    db, factory, owner, monkeypatch, project_dir, capsys
+):
+    _stub_clone(monkeypatch, project_dir)
+    investigation, job = _create(db, owner, user_message="fix it")
+    claimed = claim_next_job(db, "w1")
+
+    def _missing_model(**kwargs):
+        raise MetaAPIError(
+            "Meta API request failed (HTTP 404). "
+            "Details: The requested model was not found.",
+            status_code=404,
+        )
+
+    backend = _FakeBackend([_baseline_failure(), _verification_pass()])
+    outcome = run_job(factory, claimed.id, "w1", backend=backend, diagnose=_missing_model)
+    assert outcome == "failed"
+    out = capsys.readouterr().out
+    assert "model_not_found" in out
+    assert "phase=provider" in out
+    assert str(claimed.id) in out
+    assert "password" not in out
