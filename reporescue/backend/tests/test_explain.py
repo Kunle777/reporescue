@@ -253,7 +253,30 @@ def test_route_rejects_unknown_mode():
         main_module.RealInvestigationRequest(ingestion_id="abc", mode="bogus")
 
 
-def test_route_dispatches_explain_through_shared_entry(monkeypatch, tmp_path):
+@pytest.fixture()
+def quota_db(tmp_path):
+    """Real quota table so sync-route tests reserve for real."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(f"sqlite:///{tmp_path.as_posix()}/quota.db")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE daily_usage_counters (
+                scope_key VARCHAR(100) NOT NULL,
+                usage_date DATE NOT NULL,
+                quota_type VARCHAR(20) NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope_key, usage_date, quota_type),
+                CHECK (used >= 0)
+            )
+        """))
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+def test_route_dispatches_explain_through_shared_entry(quota_db, monkeypatch, tmp_path):
     record = _ingest_copy(monkeypatch, _make_project(tmp_path, PYTHON_PROJECT))
     user = AuthenticatedUser(id=uuid.uuid4(), email=None, claims={})
     set_ingestion_owner(record["ingestion_id"], str(user.id))
@@ -279,6 +302,7 @@ def test_route_dispatches_explain_through_shared_entry(monkeypatch, tmp_path):
             ingestion_id=record["ingestion_id"], mode="explain", message="why?"
         ),
         user,
+        quota_db,
     )
     assert result == {"status": "complete", "mode": "explain"}
     assert seen == {
@@ -291,7 +315,7 @@ def test_route_dispatches_explain_through_shared_entry(monkeypatch, tmp_path):
     }
 
 
-def test_route_debug_default_unchanged(monkeypatch, tmp_path):
+def test_route_debug_default_unchanged(quota_db, monkeypatch, tmp_path):
     record = _ingest_copy(monkeypatch, _make_project(tmp_path, PYTHON_PROJECT))
     user = AuthenticatedUser(id=uuid.uuid4(), email=None, claims={})
     set_ingestion_owner(record["ingestion_id"], str(user.id))
@@ -310,6 +334,7 @@ def test_route_debug_default_unchanged(monkeypatch, tmp_path):
     result = main_module.start_real_investigation(
         main_module.RealInvestigationRequest(ingestion_id=record["ingestion_id"]),
         user,
+        quota_db,
     )
     assert result == {"status": "complete"}
     assert seen == {
@@ -318,7 +343,7 @@ def test_route_debug_default_unchanged(monkeypatch, tmp_path):
     }
 
 
-def test_route_returns_failed_legacy_error_verbatim(monkeypatch, tmp_path):
+def test_route_returns_failed_legacy_error_verbatim(quota_db, monkeypatch, tmp_path):
     from app.orchestrate import StageResult
 
     record = _ingest_copy(monkeypatch, _make_project(tmp_path, PYTHON_PROJECT))
@@ -347,11 +372,12 @@ def test_route_returns_failed_legacy_error_verbatim(monkeypatch, tmp_path):
             ingestion_id=record["ingestion_id"], mode="explain"
         ),
         user,
+        quota_db,
     )
     assert result == legacy
 
 
-def test_route_failed_record_is_not_found(monkeypatch, tmp_path):
+def test_route_failed_record_is_not_found(quota_db, monkeypatch, tmp_path):
     record = _ingest_copy(monkeypatch, _make_project(tmp_path, PYTHON_PROJECT))
     record["status"] = "error"
     record["reason"] = "clone_failed"
@@ -368,6 +394,7 @@ def test_route_failed_record_is_not_found(monkeypatch, tmp_path):
             ingestion_id=record["ingestion_id"], mode="explain"
         ),
         user,
+        quota_db,
     )
     assert result == {
         "status": "error",
