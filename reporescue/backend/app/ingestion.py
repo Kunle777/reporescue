@@ -22,6 +22,7 @@ from typing import Any
 
 from .github_ingest import (
     IngestionError,
+    check_repo_visibility,
     clone_and_pin,
     normalize_github_url,
     temporary_workspace,
@@ -34,6 +35,20 @@ MAX_STORED_RECORDS = 50
 
 _store: dict[str, dict[str, Any]] = {}
 _store_lock = threading.Lock()
+
+
+def _private_repo_error(normalized, name: str) -> dict[str, Any]:
+    """Structured beta rejection for private-or-missing repositories."""
+    return {
+        "status": "error",
+        "reason": "private_repo_not_supported",
+        "message": (
+            "This beta currently supports public GitHub repositories only. "
+            "The repository was not found or is private."
+        ),
+        "url": normalized.url,
+        "name": name,
+    }
 
 
 def ingest_repository(
@@ -60,6 +75,8 @@ def ingest_repository(
         return {"status": "error", "reason": exc.reason, "message": str(exc)}
 
     name = f"{normalized.owner}/{normalized.repo}"
+    if check_repo_visibility(normalized.owner, normalized.repo) == "private_or_missing":
+        return _private_repo_error(normalized, name)
     ingest_start = time.perf_counter()
     timings: dict[str, int] = {}
     try:
@@ -71,6 +88,8 @@ def ingest_repository(
                 sha = clone_and_pin(normalized.url, destination, cleaned_ref)
                 timings["clone_ms"] = max(0, round((time.perf_counter() - step_start) * 1000))
             except IngestionError as exc:
+                if exc.reason == "not_found":
+                    return _private_repo_error(normalized, name)
                 return {
                     "status": "error",
                     "reason": exc.reason,
