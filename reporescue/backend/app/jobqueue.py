@@ -36,6 +36,7 @@ from .models import (
     RepoSnapshot,
     transition_allowed,
 )
+from .usage_quota import release_operation
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 60
@@ -278,6 +279,7 @@ def release_to_waiting(
 
 def complete_job(db: Session, job: Job) -> Job:
     _set_status(job, "completed")
+    _settle_investigation_quota(db, job)
     _mirror_status(db, job.id, "completed")
     db.commit()
     db.refresh(job)
@@ -290,6 +292,7 @@ def fail_job(
     _set_status(job, "failed")
     if error is not None:
         job.error = error
+    _refund_investigation_quota(db, job)
     _mirror_status(db, job.id, "failed", error=error)
     db.commit()
     db.refresh(job)
@@ -301,6 +304,7 @@ def cancel_job(db: Session, job: Job) -> Job:
     if job.status in TERMINAL_STATUSES:
         return job
     _set_status(job, "cancelled")
+    _refund_investigation_quota(db, job)
     _mirror_status(db, job.id, "cancelled")
     db.commit()
     db.refresh(job)
@@ -355,10 +359,40 @@ def recover_stale_jobs(
         else:
             _set_status(job, "failed")
             job.error = evidence
+            _refund_investigation_quota(db, job)
             _mirror_status(db, job.id, "failed", error=evidence)
             failed += 1
     db.commit()
     return {"requeued": requeued, "failed": failed}
+
+
+def _refund_investigation_quota(db: Session, job: Job) -> None:
+    """Refund this job's reserved quota exactly once, if it holds any."""
+    investigation = db.get(Investigation, job.investigation_id)
+    if investigation is None:
+        return
+    if investigation.ai_quota_charged:
+        release_operation(
+            db,
+            user_id=str(investigation.owner_id),
+            include_debug=bool(investigation.debug_quota_charged),
+            commit=False,
+        )
+        investigation.ai_quota_charged = False
+        investigation.debug_quota_charged = False
+    else:
+        # Defensive: debug implies ai, so a lone debug flag is corrupt
+        # state; clear it without granting an undeserved refund.
+        investigation.debug_quota_charged = False
+
+
+def _settle_investigation_quota(db: Session, job: Job) -> None:
+    """Clear charged flags on success: the charge stands, nothing is owed."""
+    investigation = db.get(Investigation, job.investigation_id)
+    if investigation is None:
+        return
+    investigation.ai_quota_charged = False
+    investigation.debug_quota_charged = False
 
 
 def _mirror_status(

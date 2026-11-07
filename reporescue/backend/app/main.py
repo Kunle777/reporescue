@@ -419,12 +419,19 @@ def investigate(
     """Fixture-only demo investigation. Authenticated: in meta AI mode
     this endpoint spends API quota, so anonymous callers are rejected."""
     check_rate_limit("demo", user)
+    charged = False
     try:
         if meta_client_module.get_ai_mode() == "meta" and isinstance(db, Session):
             _reserve_ai_usage(db, user)
+            charged = True
     except meta_client_module.MetaConfigError:
         pass
-    return run_investigation(request.scenario)
+    try:
+        return run_investigation(request.scenario)
+    except Exception:
+        if charged:
+            release_operation(db, user_id=str(user.id))
+        raise
 
 
 def _try_model_classification(text: str) -> dict[str, Any] | None:
@@ -600,15 +607,25 @@ def start_real_investigation(
     effective_mode = request.selected_mode
     if request.mode == "general" and effective_mode is None:
         effective_mode = route_objective(request.message).get("selected_mode")
-    if request.mode != "general" or effective_mode is not None:
+    charged = request.mode != "general" or effective_mode is not None
+    charged_debug = False
+    if charged:
+        charged_debug = _is_container_backed_debug(record, effective_mode or request.mode)
         _reserve_ai_usage(
             db, user,
-            debug=_is_container_backed_debug(record, effective_mode or request.mode),
+            debug=charged_debug,
         )
-    result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
+    try:
+        result = execute(ctx, progress=NullRecorder(), deps=HandlerDeps())
+    except Exception:
+        if charged:
+            release_operation(db, user_id=str(user.id), include_debug=charged_debug)
+        raise
     if result.status == "complete":
         assert result.report is not None
         return result.report
+    if charged:
+        release_operation(db, user_id=str(user.id), include_debug=charged_debug)
     legacy = legacy_error_of(result)
     if legacy is not None:
         return legacy
@@ -724,13 +741,16 @@ def create_job_route(
         inferred_mode = body.selected_mode
         if preselect and inferred_mode is None:
             inferred_mode = route_objective(body.message).get("selected_mode")
+        charged_ai = False
+        charged_debug = False
         if body.mode != "general" or inferred_mode is not None:
-            debug_charged = _is_container_backed_debug(record, inferred_mode or body.mode)
-            request_record.quota_kind = "user_debug" if debug_charged else "user"
+            charged_debug = _is_container_backed_debug(record, inferred_mode or body.mode)
+            charged_ai = True
+            request_record.quota_kind = "user_debug" if charged_debug else "user"
             _reserve_ai_usage(
                 db,
                 user,
-                debug=debug_charged,
+                debug=charged_debug,
                 commit=False,
             )
 
@@ -751,6 +771,8 @@ def create_job_route(
             preselect_source=body.routing_source if preselect else None,
             commit=False,
         )
+        investigation.ai_quota_charged = charged_ai
+        investigation.debug_quota_charged = charged_debug
         response = {
             "job_id": str(job.id),
             "investigation_id": str(investigation.id),
