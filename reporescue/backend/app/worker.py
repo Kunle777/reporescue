@@ -33,6 +33,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from . import config
+from . import meta_client
 from .db import get_session_factory
 from .execution import traceback_locations
 from .ingestion import clear_ingestions
@@ -58,6 +59,7 @@ from .orchestrate import (
     legacy_error_of,
 )
 from .recorder import DBRecorder, JobCancelled
+from .redact import redact_text
 
 # Pipeline error reasons worth one more attempt (transient provider
 # issues). Everything else fails fast with diagnostics preserved.
@@ -219,6 +221,34 @@ def _finalize_error(
     return error
 
 
+_FAILURE_PHASES = {
+    "config_error": "pre-request",
+    "provider_auth": "provider",
+    "model_not_found": "provider",
+    "rate_limit": "provider",
+    "api_error": "provider",
+    "api_rejected": "provider",
+    "invalid_output": "response",
+    "model_refused": "response",
+}
+
+
+def failure_phase(reason: str) -> str:
+    """Classify where a terminal failure happened for operations logs."""
+    return _FAILURE_PHASES.get(reason, "unknown")
+
+
+def format_job_failure(
+    *, worker_id: str, job_id: UUID, mode: str | None, reason: str, message: str
+) -> str:
+    """One safe log line for a terminally failed job (no secrets)."""
+    detail = redact_text(message or "", limit=300).replace("\n", " ")
+    return (
+        f"[worker {worker_id}] job {job_id} mode={mode or 'unknown'} "
+        f"-> failed reason={reason} phase={failure_phase(reason)} detail={detail}"
+    )
+
+
 def run_job(
     session_factory: Callable[[], Session],
     job_id: UUID,
@@ -300,6 +330,16 @@ def run_job(
                 error = _finalize_error(
                     db, investigation, exc.reason, str(exc),
                 )
+                print(
+                    format_job_failure(
+                        worker_id=worker_id,
+                        job_id=job_id,
+                        mode=mode,
+                        reason=exc.reason,
+                        message=str(exc),
+                    ),
+                    flush=True,
+                )
                 return fail_job(db, job, error).status
         try:
             result = execute(
@@ -321,6 +361,16 @@ def run_job(
             investigation = db.get(Investigation, investigation_id)
             error = _finalize_error(
                 db, investigation, "worker_error", f"{type(exc).__name__}: {exc}"
+            )
+            print(
+                format_job_failure(
+                    worker_id=worker_id,
+                    job_id=job_id,
+                    mode=mode,
+                    reason="worker_error",
+                    message=f"{type(exc).__name__}: {exc}",
+                ),
+                flush=True,
             )
             return fail_job(db, job, error).status
 
@@ -350,6 +400,16 @@ def run_job(
                     error=error,
                 )
                 return "waiting"
+            print(
+                format_job_failure(
+                    worker_id=worker_id,
+                    job_id=job_id,
+                    mode=mode,
+                    reason=reason,
+                    message=message,
+                ),
+                flush=True,
+            )
             return fail_job(db, job, error).status
         assert result.report is not None
         _finalize_success(db, investigation, result.report, recorder)
@@ -440,6 +500,7 @@ def run_forever(
             flush=True,
         )
     print(f"[worker {wid}] started; polling every {poll}s", flush=True)
+    print(meta_client.startup_diagnostic_line(f"[worker {wid}]"), flush=True)
     while not stopping():
         if max_jobs is not None and jobs_done >= max_jobs:
             break

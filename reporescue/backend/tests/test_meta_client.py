@@ -439,9 +439,9 @@ def test_diagnose_refusal_raises_without_retry(monkeypatch, workspace):
         (500, "api_error"),
         (503, "api_error"),
         (400, "api_rejected"),
-        (401, "api_rejected"),
-        (403, "api_rejected"),
-        (404, "api_rejected"),
+        (401, "provider_auth"),
+        (403, "provider_auth"),
+        (404, "model_not_found"),
         (422, "api_rejected"),
     ],
 )

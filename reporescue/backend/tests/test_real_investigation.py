@@ -268,7 +268,30 @@ def test_static_path_without_api_key_is_config_error(tmp_path, monkeypatch):
     assert result["reason"] == "config_error"
 
 
-def test_debug_route_threads_message_to_orchestration(monkeypatch, project_dir):
+@pytest.fixture()
+def quota_db(tmp_path):
+    """Real quota table so sync-route tests reserve for real."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(f"sqlite:///{tmp_path.as_posix()}/quota.db")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE daily_usage_counters (
+                scope_key VARCHAR(100) NOT NULL,
+                usage_date DATE NOT NULL,
+                quota_type VARCHAR(20) NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope_key, usage_date, quota_type),
+                CHECK (used >= 0)
+            )
+        """))
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+def test_debug_route_threads_message_to_orchestration(quota_db, monkeypatch, project_dir):
     record = _ingest_copy(monkeypatch, project_dir)
     user = AuthenticatedUser(id=uuid.uuid4(), email=None, claims={})
     set_ingestion_owner(record["ingestion_id"], str(user.id))
@@ -289,6 +312,7 @@ def test_debug_route_threads_message_to_orchestration(monkeypatch, project_dir):
             ingestion_id=record["ingestion_id"], message="it broke"
         ),
         user,
+        quota_db,
     )
     assert result == {"status": "complete"}
     assert seen == {
@@ -799,7 +823,7 @@ def test_select_evidence_windows_around_traceback_line(tmp_path):
     assert "line 001" not in evidence["pkg/big.py"]
 
 
-def test_sync_debug_unsupported_project_shape(monkeypatch, tmp_path):
+def test_sync_debug_unsupported_project_shape(quota_db, monkeypatch, tmp_path):
     web = tmp_path / "web"
     (web / "src").mkdir(parents=True)
     (web / "package.json").write_text('{"name": "web"}\n', encoding="utf-8")
@@ -815,6 +839,7 @@ def test_sync_debug_unsupported_project_shape(monkeypatch, tmp_path):
     result = main_module.start_real_investigation(
         main_module.RealInvestigationRequest(ingestion_id=record["ingestion_id"]),
         user,
+        quota_db,
     )
     assert result["status"] == "error"
     assert result["reason"] == "unsupported_project"
@@ -824,7 +849,7 @@ def test_sync_debug_unsupported_project_shape(monkeypatch, tmp_path):
     assert result["profile"]["commit_sha"] == FAKE_SHA
 
 
-def test_api_route_registered_and_delegates(monkeypatch, project_dir):
+def test_api_route_registered_and_delegates(quota_db, monkeypatch, project_dir):
     paths = {(route.path, tuple(route.methods or ())) for route in main_module.app.routes}
     assert ("/api/investigations", ("POST",)) in paths
 
@@ -845,6 +870,7 @@ def test_api_route_registered_and_delegates(monkeypatch, project_dir):
             ingestion_id=record["ingestion_id"], max_attempts=99
         ),
         user,
+        quota_db,
     )
     assert result == {"status": "complete"}
     assert seen == {"max_attempts": 3, "mode": "debug"}

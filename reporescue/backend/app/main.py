@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -53,10 +54,18 @@ from .orchestrate import (
 )
 from .request_logging import RequestTimingMiddleware
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Log the safe provider/deployment snapshot once at startup."""
+    print(meta_client_module.startup_diagnostic_line("[api]"), flush=True)
+    yield
+
+
 app = FastAPI(
     title="RepoRescue API",
     description="Local-first, test-backed patch verification demo.",
     version="0.4.0",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(

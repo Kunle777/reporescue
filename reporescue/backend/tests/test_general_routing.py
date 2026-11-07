@@ -642,6 +642,29 @@ def test_worker_honors_preselected_route(monkeypatch, project_dir, db, factory, 
 # --- classify endpoint ---
 
 
+@pytest.fixture()
+def quota_db(tmp_path):
+    """Real quota table so classify tests reserve for real."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(f"sqlite:///{tmp_path.as_posix()}/quota.db")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE daily_usage_counters (
+                scope_key VARCHAR(100) NOT NULL,
+                usage_date DATE NOT NULL,
+                quota_type VARCHAR(20) NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope_key, usage_date, quota_type),
+                CHECK (used >= 0)
+            )
+        """))
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
 def _classify_user(owner):
     from app.auth import AuthenticatedUser
 
@@ -667,7 +690,7 @@ def test_classify_high_confidence_skips_model(owner, monkeypatch):
     assert result["source"] == "deterministic"
 
 
-def test_classify_uses_model_for_ambiguous_objective(owner, monkeypatch):
+def test_classify_uses_model_for_ambiguous_objective(quota_db, owner, monkeypatch):
     from app import main as main_module
 
     monkeypatch.setenv("REPORESCUE_AI_MODE", "meta")
@@ -683,12 +706,13 @@ def test_classify_uses_model_for_ambiguous_objective(owner, monkeypatch):
     result = main_module.classify_general_route(
         main_module.ClassifyRequest(message="look at this repo"),
         _classify_user(owner),
+        quota_db,
     )
     assert result["selected_mode"] == "health"
     assert result["source"] == "model"
 
 
-def test_classify_falls_back_when_model_fails(owner, monkeypatch):
+def test_classify_falls_back_when_model_fails(quota_db, owner, monkeypatch):
     from app import main as main_module
     from app.meta_client import MetaAPIError
 
@@ -704,6 +728,7 @@ def test_classify_falls_back_when_model_fails(owner, monkeypatch):
     result = main_module.classify_general_route(
         main_module.ClassifyRequest(message="look at this repo"),
         _classify_user(owner),
+        quota_db,
     )
     assert result["selected_mode"] is None
     assert result["reason"] == "needs_clarification"

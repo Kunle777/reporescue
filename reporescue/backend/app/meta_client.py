@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -98,19 +99,88 @@ def get_api_key() -> str:
     return key
 
 
+def key_fingerprint(api_key: str) -> str:
+    """Non-reversible key identifier for log comparison (no secret content).
+
+    Format ``len={n} sha256={prefix}``: equal keys always match, and
+    the digest prefix cannot be turned back into the key.
+    """
+    digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    return f"len={len(api_key)} sha256={digest[:16]}"
+
+
+def provider_info() -> dict[str, Any]:
+    """Safe provider configuration snapshot for startup diagnostics.
+
+    Never raises and never includes secret material.
+    """
+    try:
+        mode = get_ai_mode()
+    except MetaConfigError:
+        mode = "invalid"
+    try:
+        key = get_api_key()
+    except MetaConfigError:
+        return {
+            "provider": "meta",
+            "model": MODEL,
+            "endpoint": API_URL,
+            "ai_mode": mode,
+            "key_present": False,
+            "key_fingerprint": None,
+        }
+    return {
+        "provider": "meta",
+        "model": MODEL,
+        "endpoint": API_URL,
+        "ai_mode": mode,
+        "key_present": True,
+        "key_fingerprint": key_fingerprint(key),
+    }
+
+
+def deployment_info() -> dict[str, str]:
+    """Service identity from the runtime environment (Railway or local)."""
+    return {
+        "service": os.environ.get("RAILWAY_SERVICE_NAME", "local"),
+        "environment": os.environ.get(
+            "RAILWAY_ENVIRONMENT_NAME", os.environ.get("RAILWAY_ENVIRONMENT", "local")
+        ),
+        "commit": (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:12],
+        "branch": os.environ.get("RAILWAY_GIT_BRANCH", "unknown"),
+    }
+
+
+def startup_diagnostic_line(prefix: str) -> str:
+    """Single safe startup log line (service, commit, provider, key state)."""
+    info = provider_info()
+    deploy = deployment_info()
+    return (
+        f"{prefix} service={deploy['service']} env={deploy['environment']} "
+        f"commit={deploy['commit']} branch={deploy['branch']} "
+        f"ai_mode={info['ai_mode']} provider={info['provider']} model={info['model']} "
+        f"key_present={info['key_present']} key={info['key_fingerprint']}"
+    )
+
+
 def api_error_reason(exc: MetaAPIError) -> str:
     """Map an API transport failure to a pipeline error reason.
 
     ``rate_limit`` (429) and ``api_error`` (5xx, 408, network failures
     with no status) are transient and may be requeued with backoff;
-    ``api_rejected`` (any other 4xx) is a permanently invalid request
-    and must fail fast without retries.
+    ``provider_auth`` (401/403), ``model_not_found`` (404) and
+    ``api_rejected`` (any other 4xx) are permanent failures and must
+    fail fast without retries.
     """
     status = exc.status_code
     if isinstance(exc, MetaRateLimitError) or status == 429:
         return "rate_limit"
     if status is None or status == 408 or status >= 500:
         return "api_error"
+    if status in (401, 403):
+        return "provider_auth"
+    if status == 404:
+        return "model_not_found"
     return "api_rejected"
 
 
