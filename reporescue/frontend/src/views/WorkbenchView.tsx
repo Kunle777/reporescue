@@ -238,6 +238,9 @@ export default function WorkbenchView({
       setJobDetail(detail);
       setPendingJobId(null);
       setTab("Overview");
+      // Clear adopting with the detail update: applying it changes the derived
+      // jobId, which re-runs this effect and invalidates live before .finally.
+      setAdopting(false);
     }).catch((error: unknown) => {
       if (live && seq === loadSeq.current) {
         setJobError(authError(error, "Could not load this investigation."));
