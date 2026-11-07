@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -116,6 +116,10 @@ class RealInvestigationRequest(BaseModel):
     max_attempts: int = 3
     mode: Literal["debug", "explain", "health", "general"] = "debug"
     message: str | None = Field(default=None, max_length=8000)
+    @field_validator("message", mode="before")
+    @classmethod
+    def _strip_message(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
     selected_mode: Literal["debug", "explain", "health"] | None = None
     routing_rationale: str | None = Field(default=None, max_length=2000)
     routing_confidence: Literal["high", "medium", "low"] | None = None
@@ -179,13 +183,22 @@ class GitHubSyncRequest(BaseModel):
 
 
 class ClassifyRequest(BaseModel):
-    message: str = Field(max_length=8000)
+    message: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def _strip_message(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class JobCreate(BaseModel):
     ingestion_id: str
     mode: Literal["debug", "explain", "health", "general"] = "debug"
     message: str | None = Field(default=None, max_length=8000)
+    @field_validator("message", mode="before")
+    @classmethod
+    def _strip_message(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
     max_attempts: int = 3
     project_id: UUID | None = None
     selected_mode: Literal["debug", "explain", "health"] | None = None
@@ -196,6 +209,11 @@ class JobCreate(BaseModel):
 
 class ConversationMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def _strip_message(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 def _require_ingestion_owner(ingestion_id: str, user: AuthenticatedUser) -> None:
@@ -494,7 +512,13 @@ def classify_general_route(
     body: ClassifyRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=16, max_length=128),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=16,
+        max_length=128,
+        description="Optional idempotency key (16-128 chars). Retries with the same key and payload return the cached classification.",
+    ),
 ) -> dict[str, Any]:
     """Classify a General objective, caching repeat requests by idempotency key."""
     request_record: IdempotencyRecord | None = None
@@ -729,9 +753,22 @@ def create_job_route(
     body: JobCreate,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
-    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=16,
+        max_length=128,
+        description="Required idempotency key (16-128 chars). Safe retries MUST reuse the same key; completed identical requests return the original result.",
+    ),
 ) -> dict[str, Any]:
-    """Enqueue one persistent investigation; repeat keys return the same job."""
+    """Enqueue one persistent investigation; repeat keys return the same job.
+
+    The Idempotency-Key header is mandatory: it is the safe-retry
+    contract. Reuse the same key when retrying the same logical
+    request (same payload returns the cached result without extra
+    quota); a different payload with the same key is rejected with
+    409. Requests without the header are rejected with 422.
+    """
     # Direct Python callers in the isolated unit tests do not pass FastAPI
     # headers. HTTP requests must provide the key; the fallback only keeps
     # direct function invocation backwards-compatible.
@@ -1061,7 +1098,13 @@ def send_investigation_message(
     body: ConversationMessageRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
-    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=16,
+        max_length=128,
+        description="Required idempotency key (16-128 chars). Safe retries MUST reuse the same key; completed identical requests return the original result.",
+    ),
 ) -> dict[str, Any]:
     """Answer a read-only follow-up using only this owned investigation's evidence."""
     if not isinstance(idempotency_key, str):

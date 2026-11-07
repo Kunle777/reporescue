@@ -198,14 +198,24 @@ def get_current_user(
 ) -> AuthenticatedUser:
     """FastAPI dependency: the user identified by a verified Bearer token."""
     if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "NOT_AUTHENTICATED", "message": "Not authenticated."},
+        )
     try:
         claims = verify_access_token(credentials.credentials)
     except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_FAILED", "message": str(exc)},
+        )
     except AuthServiceError:
         raise HTTPException(
-            status_code=503, detail="Authentication service unavailable."
+            status_code=503,
+            detail={
+                "code": "AUTH_SERVICE_UNAVAILABLE",
+                "message": "Authentication service unavailable.",
+            },
         )
     email = claims.get("email")
     return AuthenticatedUser(
