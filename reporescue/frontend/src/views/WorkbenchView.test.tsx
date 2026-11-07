@@ -148,6 +148,7 @@ describe("WorkbenchView job restoration", () => {
     await act(async () => { resolveFirst(detail()); await first; });
     expect(screen.queryByText("acme/calc")).toBeNull();
     expect(mockJobs.getJob).toHaveBeenCalledWith("j2");
+    if (mockJobs.getJob.mock.calls.length !== 2) throw new Error("CALLS=" + JSON.stringify(mockJobs.getJob.mock.calls));
   });
 
   it("shows the clarification question with a refine action", async () => {
@@ -700,5 +701,110 @@ describe("WorkbenchView request errors and retry", () => {
     expect(await screen.findByText("Retry with same request")).toBeDefined();
     fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it harder" } });
     expect(screen.queryByText("Retry with same request")).toBeNull();
+  });
+});
+
+describe("WorkbenchView usage, skeleton and accessibility", () => {
+  function pythonIngest() {
+    return { status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), primary_language: "Python", supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] as string[] };
+  }
+  function quota(aiUsed: number, debugUsed: number) {
+    return {
+      timezone: "Africa/Lagos",
+      resets_at: "2026-11-08T00:00:00+01:00",
+      ai: { used: aiUsed, limit: 10, remaining: 10 - aiUsed },
+      debug: { used: debugUsed, limit: 3, remaining: 3 - debugUsed },
+    };
+  }
+  function useQuota(q: unknown) {
+    mockApi.apiJson.mockReset();
+    mockApi.apiJson.mockResolvedValue(q);
+    mockApi.apiJson.mockResolvedValueOnce(q); // mount quota fetch
+  }
+  async function inspectPythonRepo() {
+    mockApi.apiJson.mockResolvedValueOnce(pythonIngest());
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    await screen.findByText("acme/calc");
+  }
+  function quotaCalls() {
+    return mockApi.apiJson.mock.calls.filter((call) => call[0] === "/api/usage/quota");
+  }
+
+  it("shows shared and Debug usage counters with a status role", async () => {
+    useQuota(quota(4, 2));
+    await inspectPythonRepo();
+    const indicator = await screen.findByText(/AI usage today: 4 \/ 10/);
+    expect(indicator.closest("[role=\"status\"]")).not.toBeNull();
+    expect(indicator.textContent).toContain("Debug: 2 / 3");
+  });
+
+  it("explains Debug exhaustion while other modes remain available", async () => {
+    useQuota(quota(7, 3));
+    await inspectPythonRepo();
+    expect(await screen.findByText(/AI usage today: 7 \/ 10/)).toBeDefined();
+    expect(screen.getByText(/used all 3 Debug operations/)).toBeDefined();
+    expect(screen.getByText(/remain available/)).toBeDefined();
+  });
+
+  it("explains full shared exhaustion", async () => {
+    useQuota(quota(10, 1));
+    await inspectPythonRepo();
+    expect(await screen.findByText(/used all 10 AI operations/)).toBeDefined();
+    expect(screen.getByText(/allowance resets tomorrow/)).toBeDefined();
+  });
+
+  it("refreshes usage after a successful start but not after a failure", async () => {
+    useQuota(quota(4, 2));
+    await inspectPythonRepo();
+    expect(quotaCalls()).toHaveLength(1);
+    mockApi.apiJson.mockResolvedValue(quota(5, 2));
+    mockJobs.getJob.mockResolvedValue(detail({ status: "completed" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+    mockJobs.createJob.mockRejectedValueOnce(new ApiError(502, "bad gateway"));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("Retry with same request")).toBeDefined();
+    expect(quotaCalls()).toHaveLength(1);
+    expect(screen.getByText(/AI usage today: 4 \/ 10/)).toBeDefined();
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j1", investigation_id: "i1", status: "queued" });
+    fireEvent.click(screen.getByText("Retry with same request"));
+    expect(await screen.findByText(/AI usage today: 5 \/ 10/)).toBeDefined();
+    expect(quotaCalls().length).toBeGreaterThan(1);
+  });
+
+  it("shows an accessible skeleton while starting and clears it after", async () => {
+    mockApi.apiJson.mockResolvedValueOnce(pythonIngest());
+    mockJobs.getJob.mockResolvedValue(detail({ status: "completed" }));
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+    let resolveStart!: (value: unknown) => void;
+    mockJobs.createJob.mockReturnValueOnce(new Promise((resolve) => { resolveStart = resolve; }));
+    fireEvent.click(screen.getByText("Start investigation"));
+    const skeleton = await screen.findByRole("status", { name: "Loading investigation" });
+    expect(skeleton.getAttribute("aria-busy")).toBe("true");
+    await act(async () => { resolveStart({ job_id: "j1", investigation_id: "i1", status: "queued" }); });
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading investigation" })).toBeNull());
+  });
+
+  it("hides stale detail behind a skeleton when switching investigations", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail({ repo_name: "acme/old", status: "completed" }));
+    const view = render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
+    await screen.findByText("acme/old");
+    let resolveSecond!: (value: unknown) => void;
+    mockJobs.getJob.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+    view.rerender(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j2" />);
+    await screen.findByRole("status", { name: "Loading investigation" });
+    expect(screen.queryByText("acme/old")).toBeNull();
+    await act(async () => {
+      resolveSecond(detail({ investigation_id: "i2", repo_name: "acme/new", status: "completed", job: { job_id: "j2", investigation_id: "i2", status: "completed", attempts: 1, max_attempts: 3, error: null, created_at: null, updated_at: null } }));
+    });
+    await screen.findByText("acme/new");
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading investigation" })).toBeNull());
   });
 });
