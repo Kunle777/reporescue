@@ -186,6 +186,11 @@ class Investigation(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # True while this investigation holds reserved quota slots that
+    # must be refunded if the operation ultimately fails. Cleared on
+    # success (charge stands) or refunded-and-cleared on failure.
+    ai_quota_charged: Mapped[bool] = mapped_column(nullable=False, default=False)
+    debug_quota_charged: Mapped[bool] = mapped_column(nullable=False, default=False)
 
     attempts: Mapped[list["InvestigationAttempt"]] = relationship(
         back_populates="investigation", cascade="all, delete-orphan", passive_deletes=True
@@ -433,7 +438,7 @@ class IdempotencyRecord(Base):
             name="uq_idempotency_owner_scope_key",
         ),
         CheckConstraint(
-            "status IN ('processing', 'completed')",
+            "status IN ('processing', 'completed', 'failed')",
             name="ck_idempotency_status",
         ),
     )
@@ -447,6 +452,7 @@ class IdempotencyRecord(Base):
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="processing")
     response: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    quota_refunded: Mapped[bool] = mapped_column(nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
