@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .patch_guard import FileEdit, PatchProposal, PatchSet
+from .redact import redact_data, sanitize_model_text
 
 logger = logging.getLogger("reporescue.meta")
 
@@ -815,7 +816,10 @@ def _render_context(workspace: Path) -> str:
 
 
 def _post_chat_completion(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
+    # Defense in depth: every outbound provider payload is redacted at
+    # this single choke point, whatever the caller assembled.
+    safe_payload = redact_data(payload)
+    body = json.dumps(safe_payload).encode("utf-8")
     request = urllib.request.Request(
         API_URL,
         data=body,
@@ -969,7 +973,7 @@ def _extract_content(data: dict[str, Any]) -> tuple[str, str | None]:
                 "truncated by the output-token limit."
             )
         raise MetaResponseError("Meta API response contained no message content.")
-    return content, finish
+    return sanitize_model_text(content), finish
 
 
 def _parse_json_object(content: str, finish_reason: str | None) -> dict[str, Any]:

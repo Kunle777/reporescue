@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 
 import hashlib
 import json
-import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -24,6 +23,7 @@ from .db import get_db
 from .general import route_objective
 from .github_ingest import IngestionError
 from .rate_limit import check_rate_limit
+from .redact import redact_text, sanitize_model_text
 from .usage_quota import UsageLimitExceeded, reserve_global_call, reserve_operation, usage_status
 from .ingestion import (
     get_ingestion,
@@ -773,18 +773,9 @@ def get_investigation_route(
     return jobqueue_module.investigation_detail(db, investigation)
 
 
-_SECRET_VALUE_RE = re.compile(
-    r"(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\\b"
-    r"(\\s*[:=]\\s*)[^\\s,;]+"
-)
-_BEARER_RE = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*")
-
-
 def _redact_conversation_text(value: object, limit: int = 1800) -> str:
-    text = str(value or "")
-    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
-    text = _SECRET_VALUE_RE.sub(r"\\1\\2[REDACTED]", text)
-    return text[:limit]
+    """Redact credentials from conversation context (see app.redact)."""
+    return redact_text(value, limit=limit)
 
 
 def _build_conversation_context(
@@ -1004,7 +995,7 @@ def send_investigation_message(
             model_result = meta_client_module.conversation_reply(
                 context=context,
                 history=history,
-                question=body.message.strip(),
+                question=_redact_conversation_text(body.message.strip(), 2000),
                 api_key=api_key,
             )
             returned_ids = model_result["evidence_ids"]
@@ -1015,7 +1006,7 @@ def send_investigation_message(
                 else "verified" if valid_ids
                 else "unverified"
             )
-            answer = model_result["answer"]
+            answer = sanitize_model_text(model_result["answer"])
         except meta_client_module.MetaClientError:
             answer = (
                 "I couldn't complete that response from the available investigation "
