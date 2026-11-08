@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { ApiError, apiJson } from "../lib/api";
-import { friendlyError, reasonTitle } from "../lib/errors";
+import { friendlyError, isQuotaExhausted, reasonTitle } from "../lib/errors";
 import { classifyObjective, type Classification } from "../lib/general";
 import { cancelJob, createJob, getJob, listJobs, sendConversationMessage } from "../lib/jobs";
 import { Markdown } from "../lib/markdown";
@@ -329,6 +329,7 @@ export default function WorkbenchView({
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       const friendly = friendlyError(error, "Follow-up not sent", "Could not send your follow-up. Please try again.");
+      if (isQuotaExhausted(error)) void refreshQuota();
       setConversationError(friendly.message);
       setConversationRetryKey(friendly.retryable ? key : null);
     } finally {
@@ -418,6 +419,7 @@ export default function WorkbenchView({
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) onUnauthorized();
         const friendly = friendlyError(error, "Investigation not started", "Could not classify the objective.");
+        if (isQuotaExhausted(error)) void refreshQuota();
         setInvestError(friendly.message);
         setSubmitRetryKey(friendly.retryable ? requestKey : null);
         submitting.current = false;
@@ -466,6 +468,7 @@ export default function WorkbenchView({
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       const friendly = friendlyError(error, "Investigation not started", "Could not start the investigation.");
+      if (isQuotaExhausted(error)) void refreshQuota();
       setInvestError(friendly.message);
       setSubmitRetryKey(friendly.retryable ? requestKey : null);
     } finally {

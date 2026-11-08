@@ -702,6 +702,21 @@ describe("WorkbenchView request errors and retry", () => {
     fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it harder" } });
     expect(screen.queryByText("Retry with same request")).toBeNull();
   });
+
+  it("shows the limit message without retry and refreshes usage on quota 429", async () => {
+    await startWithObjective();
+    mockApi.apiJson.mockResolvedValue({
+      ...DEFAULT_QUOTA,
+      ai: { used: 10, limit: 10, remaining: 0 },
+    });
+    mockJobs.createJob.mockRejectedValueOnce(
+      new ApiError(429, "The API is rate limiting requests.", "AI_DAILY_USER_LIMIT_REACHED")
+    );
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText(/You've reached your 10 AI operations/)).toBeDefined();
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+    expect(await screen.findByText(/used all 10 AI operations/)).toBeDefined();
+  });
 });
 
 describe("WorkbenchView usage, skeleton and accessibility", () => {

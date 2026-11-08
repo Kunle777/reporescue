@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
-import { friendlyError, reasonTitle } from "./errors";
+import { friendlyError, isQuotaExhausted, reasonTitle } from "./errors";
 
 describe("friendlyError", () => {
   it("maps known backend codes to titles and retry flags", () => {
@@ -14,11 +14,30 @@ describe("friendlyError", () => {
       message: "Slow down.",
       retryable: true,
     });
-    expect(friendlyError(new ApiError(429, "Daily cap.", "BETA_DAILY_AI_LIMIT_REACHED"), "T", "F")).toEqual({
+    expect(friendlyError(new ApiError(429, "Daily cap.", "AI_DAILY_USER_LIMIT_REACHED"), "T", "F")).toEqual({
       title: "Daily AI limit reached",
-      message: "Daily cap.",
+      message: "You've reached your 10 AI operations for today. Your allowance resets tomorrow.",
       retryable: false,
     });
+    expect(friendlyError(new ApiError(429, "Daily cap.", "BETA_DAILY_DEBUG_LIMIT_REACHED"), "T", "F")).toEqual({
+      title: "Daily Debug limit reached",
+      message: "You've used all 3 Debug operations for today. General, Explain, Health and Conversation remain available.",
+      retryable: false,
+    });
+    expect(friendlyError(new ApiError(429, "Daily cap.", "GLOBAL_AI_DAILY_LIMIT_REACHED"), "T", "F")).toEqual({
+      title: "RepoRescue is at capacity",
+      message: "RepoRescue has reached its shared daily AI capacity. Please try again tomorrow.",
+      retryable: false,
+    });
+  });
+
+  it("recognizes the real backend quota codes", () => {
+    expect(isQuotaExhausted(new ApiError(429, "x", "AI_DAILY_USER_LIMIT_REACHED"))).toBe(true);
+    expect(isQuotaExhausted(new ApiError(429, "x", "BETA_DAILY_DEBUG_LIMIT_REACHED"))).toBe(true);
+    expect(isQuotaExhausted(new ApiError(429, "x", "GLOBAL_AI_DAILY_LIMIT_REACHED"))).toBe(true);
+    expect(isQuotaExhausted(new ApiError(429, "x", "PROVIDER_RATE_LIMITED"))).toBe(false);
+    expect(isQuotaExhausted(new ApiError(429, "x"))).toBe(false);
+    expect(isQuotaExhausted(new Error("boom"))).toBe(false);
   });
 
   it("treats timeouts and network failures as retryable", () => {
