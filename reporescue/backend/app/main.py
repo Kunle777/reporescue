@@ -285,21 +285,6 @@ def _require_debug_python(record: dict[str, Any], mode: str) -> None:
     )
 
 
-def _is_container_backed_debug(record: dict[str, Any], selected_mode: str | None) -> bool:
-    """Apply the Debug allowance only when this request can reach a container."""
-    if selected_mode != "debug":
-        return False
-    profile = record.get("profile") if isinstance(record, dict) else None
-    capabilities = profile.get("capabilities", {}) if isinstance(profile, dict) else {}
-    runnable = capabilities.get("runnable", {}) if isinstance(capabilities, dict) else {}
-    if not isinstance(runnable, dict) or not runnable.get("python"):
-        return False
-    try:
-        return config.get_execution_backend() in ("auto", "modal", "docker")
-    except config.ConfigError:
-        return False
-
-
 def _reserve_ai_usage(
     db: Session,
     user: AuthenticatedUser,
@@ -665,7 +650,7 @@ def start_real_investigation(
     charged = request.mode != "general" or effective_mode is not None
     charged_debug = False
     if charged:
-        charged_debug = _is_container_backed_debug(record, effective_mode or request.mode)
+        charged_debug = (effective_mode or request.mode) == "debug"
         _reserve_ai_usage(
             db, user,
             debug=charged_debug,
@@ -813,7 +798,7 @@ def create_job_route(
         charged_ai = False
         charged_debug = False
         if body.mode != "general" or inferred_mode is not None:
-            charged_debug = _is_container_backed_debug(record, inferred_mode or body.mode)
+            charged_debug = (inferred_mode or body.mode) == "debug"
             charged_ai = True
             request_record.quota_kind = "user_debug" if charged_debug else "user"
             _reserve_ai_usage(

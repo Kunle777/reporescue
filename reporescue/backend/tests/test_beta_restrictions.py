@@ -28,7 +28,7 @@ from app.auth import AuthenticatedUser
 from app.github_ingest import IngestionError
 from app.ingestion import set_ingestion_owner
 from app.models import Base, Investigation, Profile
-from app.usage_quota import usage_status
+from app.usage_quota import reserve_operation, usage_status
 
 
 @pytest.fixture(autouse=True)
@@ -288,3 +288,28 @@ def test_sync_debug_on_javascript_rejected(db, owner, monkeypatch, js_dir):
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
     assert usage_status(db, user_id=str(owner))["ai"]["used"] == 0
+
+
+def test_static_debug_consumes_shared_and_debug_quota(db, owner, monkeypatch, project_dir):
+    record = _ingest_owned(monkeypatch, project_dir, owner)
+    assert record["profile"]["supported"] is True
+    assert not record["profile"]["capabilities"].get("test_frameworks")
+    result = _job(db, owner, record, message="fix it")
+    assert result["status"] == "queued"
+    status = usage_status(db, user_id=str(owner))
+    assert status["ai"]["used"] == 1
+    assert status["debug"]["used"] == 1
+
+
+def test_static_debug_enforces_debug_limit(db, owner, monkeypatch, project_dir):
+    record = _ingest_owned(monkeypatch, project_dir, owner)
+    for _ in range(3):
+        reserve_operation(db, user_id=str(owner), include_debug=True)
+    with pytest.raises(HTTPException) as exc_info:
+        _job(db, owner, record, message="fix it")
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail["code"] == "BETA_DAILY_DEBUG_LIMIT_REACHED"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 3
+    result = _job(db, owner, record, mode="explain", message="explain this")
+    assert result["status"] == "queued"
+    assert usage_status(db, user_id=str(owner))["ai"]["used"] == 4
