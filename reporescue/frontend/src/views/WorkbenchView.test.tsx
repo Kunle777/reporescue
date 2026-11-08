@@ -10,6 +10,7 @@ const mockJobs = vi.hoisted(() => ({
   getJob: vi.fn(),
   listJobs: vi.fn(),
   cancelJob: vi.fn(),
+  sendConversationMessage: vi.fn(),
 }));
 
 vi.mock("../lib/jobs", () => mockJobs);
@@ -83,9 +84,19 @@ function debugReport() {
   };
 }
 
+const DEFAULT_QUOTA = {
+  timezone: "Africa/Lagos",
+  resets_at: "2026-11-08T00:00:00+01:00",
+  ai: { used: 0, limit: 10, remaining: 10 },
+  debug: { used: 0, limit: 3, remaining: 3 },
+};
+
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockJobs.listJobs.mockResolvedValue([]);
+  mockApi.apiJson.mockResolvedValue(DEFAULT_QUOTA);
+  // Mount fetches quota first; per-test action mocks queue after it.
+  mockApi.apiJson.mockResolvedValueOnce(DEFAULT_QUOTA);
 });
 
 describe("WorkbenchView job restoration", () => {
@@ -137,6 +148,7 @@ describe("WorkbenchView job restoration", () => {
     await act(async () => { resolveFirst(detail()); await first; });
     expect(screen.queryByText("acme/calc")).toBeNull();
     expect(mockJobs.getJob).toHaveBeenCalledWith("j2");
+    if (mockJobs.getJob.mock.calls.length !== 2) throw new Error("CALLS=" + JSON.stringify(mockJobs.getJob.mock.calls));
   });
 
   it("shows the clarification question with a refine action", async () => {
@@ -198,6 +210,7 @@ describe("WorkbenchView job restoration", () => {
       ingestion_id: "ing1",
       mode: "debug",
       message: "fix the bug",
+      idempotencyKey: expect.any(String),
     });
   });
 
@@ -235,7 +248,7 @@ describe("WorkbenchView job restoration", () => {
     });
     fireEvent.click(screen.getByText("Start investigation"));
     await waitFor(() => expect(mockJobs.createJob).toHaveBeenCalledTimes(1));
-    expect(mockGeneral.classifyObjective).toHaveBeenCalledWith("fix the failing tests");
+    expect(mockGeneral.classifyObjective).toHaveBeenCalledWith("fix the failing tests", expect.any(String));
     expect(mockJobs.createJob).toHaveBeenCalledWith({
       ingestion_id: "ing1",
       mode: "general",
@@ -244,6 +257,7 @@ describe("WorkbenchView job restoration", () => {
       routing_rationale: "Failure signals matched.",
       routing_confidence: "high",
       routing_source: "deterministic",
+      idempotencyKey: expect.any(String),
     });
     expect(onJobSelected).toHaveBeenCalledWith("j7");
     expect(await screen.findByText(/GENERAL → DEBUG INVESTIGATION/)).toBeDefined();
@@ -295,14 +309,14 @@ describe("WorkbenchView job restoration", () => {
     expect(mockJobs.createJob).toHaveBeenCalledTimes(1);
   });
 
-  it("renders persisted conversation history read-only", async () => {
+  it("renders persisted conversation history with a working composer", async () => {
     mockJobs.getJob.mockResolvedValueOnce(detail({ messages: [{ role: "user", content: "Where is the parser?" }, { role: "assistant", content: "The API persisted this response." }] }));
     render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
     await screen.findByText("acme/calc");
     fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     expect(screen.getByText("Where is the parser?")).toBeDefined();
     expect(screen.getByText("The API persisted this response.")).toBeDefined();
-    expect(screen.getByText(/Sending follow-up messages is not available/)).toBeDefined();
+    expect(screen.getByPlaceholderText("Ask a follow-up about the findings or evidence…")).toBeDefined();
   });
 
   it("renders backend findings, execution evidence, and proposed patches without conflating verification", async () => {
@@ -445,12 +459,10 @@ describe("WorkbenchView repository inspection", () => {
     mockApi.apiJson.mockResolvedValueOnce(completeIngest());
     inspect();
     await screen.findByText("What should RepoRescue do?");
-    expect(mockApi.apiJson).toHaveBeenCalledTimes(1);
-    expect(mockApi.apiJson).toHaveBeenCalledWith(
-      "/api/repos/ingest",
-      expect.objectContaining({ method: "POST" }),
-      { timeoutMs: 150000 }
-    );
+    const ingestCalls = mockApi.apiJson.mock.calls.filter((call) => call[0] === "/api/repos/ingest");
+    expect(ingestCalls).toHaveLength(1);
+    expect(ingestCalls[0][1]).toEqual(expect.objectContaining({ method: "POST" }));
+    expect(ingestCalls[0][2]).toEqual({ timeoutMs: 150000 });
   });
 });
 
@@ -566,5 +578,248 @@ describe("WorkbenchView patch download", () => {
     expect(
       screen.getByText("Proposed: suggested by the model, not applied anywhere.")
     ).toBeDefined();
+  });
+});
+
+describe("WorkbenchView beta restrictions", () => {
+  function pythonIngest() {
+    return { status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), primary_language: "Python", supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] as string[] };
+  }
+  function jsIngest() {
+    return {
+      status: "complete",
+      ingestion_id: "ing-js",
+      profile: {
+        name: "acme/web",
+        commit_sha: "j".repeat(40),
+        ref: "main",
+        primary_language: "JavaScript",
+        supported: false,
+        test_framework: "none",
+        tests: { dirs: [], files: [], count: 0 },
+        warnings: [],
+      },
+      warnings: [] as string[],
+    };
+  }
+
+  async function inspectRepo(url: string, payload: unknown) {
+    mockApi.apiJson.mockResolvedValueOnce(payload);
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: url } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+  }
+
+  it("shows the public-only beta notice without inspecting", () => {
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    expect(screen.getByText(/Beta limitation/)).toBeDefined();
+    expect(screen.getByText(/public GitHub repositories only/)).toBeDefined();
+  });
+
+  it("shows the Python-only note when Debug is selected", async () => {
+    await inspectRepo("https://github.com/acme/calc", pythonIngest());
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    expect(screen.getByText(/Python-only in beta/)).toBeDefined();
+  });
+
+  it("blocks Debug on non-Python repos but allows switching modes", async () => {
+    await inspectRepo("https://github.com/acme/web", jsIngest());
+    await screen.findByText("acme/web");
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    expect(screen.getByText("Debug can't run on this repository")).toBeDefined();
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(mockJobs.createJob).not.toHaveBeenCalled();
+    expect(screen.getByText(/not a Python project/)).toBeDefined();
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+    expect((screen.getByLabelText("Problem statement or objective") as HTMLTextAreaElement).value).toBe("fix it");
+    fireEvent.click(screen.getByRole("radio", { name: /Explain/ }));
+    expect(screen.queryByText("Debug can't run on this repository")).toBeNull();
+    mockJobs.createJob.mockRejectedValueOnce(new ApiError(502, "bad gateway"));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("bad gateway")).toBeDefined();
+    expect(mockJobs.createJob).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Retry with same request")).toBeDefined();
+  });
+
+  it("renders the private-repository beta label", async () => {
+    await inspectRepo("https://github.com/acme/secret", {
+      status: "error",
+      reason: "private_repo_not_supported",
+      message: "The repository was not found or is private.",
+      url: "https://github.com/acme/secret",
+      name: "acme/secret",
+    });
+    expect(await screen.findByText(/public GitHub repositories only/)).toBeDefined();
+  });
+});
+
+describe("WorkbenchView request errors and retry", () => {
+  function pythonIngest() {
+    return { status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), primary_language: "Python", supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] as string[] };
+  }
+  async function startWithObjective() {
+    mockApi.apiJson.mockResolvedValueOnce(pythonIngest());
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+  }
+
+  it("shows coded backend errors without a retry action", async () => {
+    await startWithObjective();
+    mockJobs.createJob.mockRejectedValueOnce(
+      new ApiError(422, "Debug mode currently supports Python repositories only.", "DEBUG_PYTHON_ONLY")
+    );
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("Debug mode currently supports Python repositories only.")).toBeDefined();
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+    expect((screen.getByLabelText("Problem statement or objective") as HTMLTextAreaElement).value).toBe("fix it");
+  });
+
+  it("retries retryable failures with the same idempotency key", async () => {
+    await startWithObjective();
+    mockJobs.createJob.mockRejectedValueOnce(new ApiError(502, "bad gateway"));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("Retry with same request")).toBeDefined();
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j9", investigation_id: "i9", status: "queued" });
+    fireEvent.click(screen.getByText("Retry with same request"));
+    await waitFor(() => expect(mockJobs.createJob).toHaveBeenCalledTimes(2));
+    const [first, second] = mockJobs.createJob.mock.calls;
+    expect(typeof first[0].idempotencyKey).toBe("string");
+    expect(second[0].idempotencyKey).toBe(first[0].idempotencyKey);
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+  });
+
+  it("clears the retry action when the objective changes", async () => {
+    await startWithObjective();
+    mockJobs.createJob.mockRejectedValueOnce(new ApiError(0, "timed out"));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("Retry with same request")).toBeDefined();
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it harder" } });
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+  });
+
+  it("shows the limit message without retry and refreshes usage on quota 429", async () => {
+    await startWithObjective();
+    mockApi.apiJson.mockResolvedValue({
+      ...DEFAULT_QUOTA,
+      ai: { used: 10, limit: 10, remaining: 0 },
+    });
+    mockJobs.createJob.mockRejectedValueOnce(
+      new ApiError(429, "The API is rate limiting requests.", "AI_DAILY_USER_LIMIT_REACHED")
+    );
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText(/You've reached your 10 AI operations/)).toBeDefined();
+    expect(screen.queryByText("Retry with same request")).toBeNull();
+    expect(await screen.findByText(/used all 10 AI operations/)).toBeDefined();
+  });
+});
+
+describe("WorkbenchView usage, skeleton and accessibility", () => {
+  function pythonIngest() {
+    return { status: "complete", ingestion_id: "ing1", profile: { name: "acme/calc", commit_sha: "b".repeat(40), primary_language: "Python", supported: true, tests: { count: 0 }, warnings: [] }, warnings: [] as string[] };
+  }
+  function quota(aiUsed: number, debugUsed: number) {
+    return {
+      timezone: "Africa/Lagos",
+      resets_at: "2026-11-08T00:00:00+01:00",
+      ai: { used: aiUsed, limit: 10, remaining: 10 - aiUsed },
+      debug: { used: debugUsed, limit: 3, remaining: 3 - debugUsed },
+    };
+  }
+  function useQuota(q: unknown) {
+    mockApi.apiJson.mockReset();
+    mockApi.apiJson.mockResolvedValue(q);
+    mockApi.apiJson.mockResolvedValueOnce(q); // mount quota fetch
+  }
+  async function inspectPythonRepo() {
+    mockApi.apiJson.mockResolvedValueOnce(pythonIngest());
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    await screen.findByText("acme/calc");
+  }
+  function quotaCalls() {
+    return mockApi.apiJson.mock.calls.filter((call) => call[0] === "/api/usage/quota");
+  }
+
+  it("shows shared and Debug usage counters with a status role", async () => {
+    useQuota(quota(4, 2));
+    await inspectPythonRepo();
+    const indicator = await screen.findByText(/AI usage today: 4 \/ 10/);
+    expect(indicator.closest("[role=\"status\"]")).not.toBeNull();
+    expect(indicator.textContent).toContain("Debug: 2 / 3");
+  });
+
+  it("explains Debug exhaustion while other modes remain available", async () => {
+    useQuota(quota(7, 3));
+    await inspectPythonRepo();
+    expect(await screen.findByText(/AI usage today: 7 \/ 10/)).toBeDefined();
+    expect(screen.getByText(/used all 3 Debug operations/)).toBeDefined();
+    expect(screen.getByText(/remain available/)).toBeDefined();
+  });
+
+  it("explains full shared exhaustion", async () => {
+    useQuota(quota(10, 1));
+    await inspectPythonRepo();
+    expect(await screen.findByText(/used all 10 AI operations/)).toBeDefined();
+    expect(screen.getByText(/allowance resets tomorrow/)).toBeDefined();
+  });
+
+  it("refreshes usage after a successful start but not after a failure", async () => {
+    useQuota(quota(4, 2));
+    await inspectPythonRepo();
+    expect(quotaCalls()).toHaveLength(1);
+    mockApi.apiJson.mockResolvedValue(quota(5, 2));
+    mockJobs.getJob.mockResolvedValue(detail({ status: "completed" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+    mockJobs.createJob.mockRejectedValueOnce(new ApiError(502, "bad gateway"));
+    fireEvent.click(screen.getByText("Start investigation"));
+    expect(await screen.findByText("Retry with same request")).toBeDefined();
+    expect(quotaCalls()).toHaveLength(1);
+    expect(screen.getByText(/AI usage today: 4 \/ 10/)).toBeDefined();
+    mockJobs.createJob.mockResolvedValueOnce({ job_id: "j1", investigation_id: "i1", status: "queued" });
+    fireEvent.click(screen.getByText("Retry with same request"));
+    expect(await screen.findByText(/AI usage today: 5 \/ 10/)).toBeDefined();
+    expect(quotaCalls().length).toBeGreaterThan(1);
+  });
+
+  it("shows an accessible skeleton while starting and clears it after", async () => {
+    mockApi.apiJson.mockResolvedValueOnce(pythonIngest());
+    mockJobs.getJob.mockResolvedValue(detail({ status: "completed" }));
+    render(<WorkbenchView session={session} onUnauthorized={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/Repository URL/i), { target: { value: "https://github.com/acme/calc" } });
+    fireEvent.click(screen.getByText("Inspect repository"));
+    await screen.findByText("acme/calc");
+    fireEvent.click(screen.getByRole("radio", { name: /Debug/ }));
+    fireEvent.change(screen.getByLabelText("Problem statement or objective"), { target: { value: "fix it" } });
+    let resolveStart!: (value: unknown) => void;
+    mockJobs.createJob.mockReturnValueOnce(new Promise((resolve) => { resolveStart = resolve; }));
+    fireEvent.click(screen.getByText("Start investigation"));
+    const skeleton = await screen.findByRole("status", { name: "Loading investigation" });
+    expect(skeleton.getAttribute("aria-busy")).toBe("true");
+    await act(async () => { resolveStart({ job_id: "j1", investigation_id: "i1", status: "queued" }); });
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading investigation" })).toBeNull());
+  });
+
+  it("hides stale detail behind a skeleton when switching investigations", async () => {
+    mockJobs.getJob.mockResolvedValueOnce(detail({ repo_name: "acme/old", status: "completed" }));
+    const view = render(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j1" />);
+    await screen.findByText("acme/old");
+    let resolveSecond!: (value: unknown) => void;
+    mockJobs.getJob.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+    view.rerender(<WorkbenchView session={session} onUnauthorized={() => {}} selectedJobId="j2" />);
+    await screen.findByRole("status", { name: "Loading investigation" });
+    expect(screen.queryByText("acme/old")).toBeNull();
+    await act(async () => {
+      resolveSecond(detail({ investigation_id: "i2", repo_name: "acme/new", status: "completed", job: { job_id: "j2", investigation_id: "i2", status: "completed", attempts: 1, max_attempts: 3, error: null, created_at: null, updated_at: null } }));
+    });
+    await screen.findByText("acme/new");
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading investigation" })).toBeNull());
   });
 });

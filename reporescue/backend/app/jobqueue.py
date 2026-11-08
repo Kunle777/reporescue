@@ -36,6 +36,7 @@ from .models import (
     RepoSnapshot,
     transition_allowed,
 )
+from .usage_quota import release_operation
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 60
@@ -91,6 +92,7 @@ def create_investigation(
     preselect_rationale: str | None = None,
     preselect_confidence: str | None = None,
     preselect_source: str | None = None,
+    commit: bool = True,
 ) -> tuple[Investigation, Job]:
     """Create a queued investigation plus its job, atomically.
 
@@ -149,9 +151,11 @@ def create_investigation(
         max_attempts=DEFAULT_MAX_ATTEMPTS,
     )
     db.add(job)
-    db.commit()
-    db.refresh(investigation)
-    db.refresh(job)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(investigation)
+        db.refresh(job)
     return investigation, job
 
 
@@ -275,6 +279,7 @@ def release_to_waiting(
 
 def complete_job(db: Session, job: Job) -> Job:
     _set_status(job, "completed")
+    _settle_investigation_quota(db, job)
     _mirror_status(db, job.id, "completed")
     db.commit()
     db.refresh(job)
@@ -287,6 +292,7 @@ def fail_job(
     _set_status(job, "failed")
     if error is not None:
         job.error = error
+    _refund_investigation_quota(db, job)
     _mirror_status(db, job.id, "failed", error=error)
     db.commit()
     db.refresh(job)
@@ -298,6 +304,7 @@ def cancel_job(db: Session, job: Job) -> Job:
     if job.status in TERMINAL_STATUSES:
         return job
     _set_status(job, "cancelled")
+    _refund_investigation_quota(db, job)
     _mirror_status(db, job.id, "cancelled")
     db.commit()
     db.refresh(job)
@@ -352,10 +359,40 @@ def recover_stale_jobs(
         else:
             _set_status(job, "failed")
             job.error = evidence
+            _refund_investigation_quota(db, job)
             _mirror_status(db, job.id, "failed", error=evidence)
             failed += 1
     db.commit()
     return {"requeued": requeued, "failed": failed}
+
+
+def _refund_investigation_quota(db: Session, job: Job) -> None:
+    """Refund this job's reserved quota exactly once, if it holds any."""
+    investigation = db.get(Investigation, job.investigation_id)
+    if investigation is None:
+        return
+    if investigation.ai_quota_charged:
+        release_operation(
+            db,
+            user_id=str(investigation.owner_id),
+            include_debug=bool(investigation.debug_quota_charged),
+            commit=False,
+        )
+        investigation.ai_quota_charged = False
+        investigation.debug_quota_charged = False
+    else:
+        # Defensive: debug implies ai, so a lone debug flag is corrupt
+        # state; clear it without granting an undeserved refund.
+        investigation.debug_quota_charged = False
+
+
+def _settle_investigation_quota(db: Session, job: Job) -> None:
+    """Clear charged flags on success: the charge stands, nothing is owed."""
+    investigation = db.get(Investigation, job.investigation_id)
+    if investigation is None:
+        return
+    investigation.ai_quota_charged = False
+    investigation.debug_quota_charged = False
 
 
 def _mirror_status(
@@ -653,6 +690,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "runs": [
             {
+                "id": str(run.id),
                 "kind": run.kind,
                 "command": run.command,
                 "backend": run.backend,
@@ -671,6 +709,7 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
         ],
         "findings": [
             {
+                "id": str(finding.id),
                 "kind": finding.kind,
                 "category": finding.category,
                 "title": finding.title,
@@ -689,7 +728,14 @@ def investigation_detail(db: Session, investigation: Investigation) -> dict[str,
             for patch in patches
         ],
         "messages": [
-            {"role": message.role, "content": message.content}
+            {
+                "id": str(message.id),
+                "role": message.role,
+                "content": message.content,
+                "grounding_status": message.grounding_status,
+                "evidence_ids": list(message.evidence_ids or []),
+                "created_at": _iso(message.created_at),
+            }
             for message in messages
         ],
     }

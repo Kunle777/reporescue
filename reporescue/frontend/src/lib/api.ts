@@ -2,10 +2,12 @@ import { getSupabase, isSupabaseConfigured } from "./supabase";
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -65,18 +67,25 @@ export async function throwForStatus(response: Response): Promise<void> {
     503: "The API is temporarily unavailable.",
   };
   let detail = labels[response.status] ?? `API returned HTTP ${response.status}`;
+  let code: string | undefined;
   try {
     const body = (await response.json()) as {
       detail?: unknown;
       message?: unknown;
     };
-    if (typeof body.detail === "string") detail = `${detail} ${body.detail}`;
+    const raw = body.detail as unknown;
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      const rec = raw as Record<string, unknown>;
+      if (typeof rec.code === "string") code = rec.code;
+      // Structured backend errors carry their own user-safe message.
+      if (typeof rec.message === "string") detail = rec.message;
+    } else if (typeof body.detail === "string") detail = `${detail} ${body.detail}`;
     else if (Array.isArray(body.detail)) detail = `${detail} ${body.detail.map((item) => typeof item === "object" && item !== null && "msg" in item ? String(item.msg) : String(item)).join("; ")}`;
     else if (typeof body.message === "string") detail = `${detail} ${body.message}`;
   } catch {
     /* keep the default detail */
   }
-  throw new ApiError(response.status, detail);
+  throw new ApiError(response.status, detail, code);
 }
 
 /** apiFetch() that throws ApiError on HTTP errors and returns parsed JSON. */

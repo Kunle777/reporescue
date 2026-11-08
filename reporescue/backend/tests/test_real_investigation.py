@@ -11,12 +11,14 @@ import subprocess
 import uuid
 
 import pytest
+from fastapi import HTTPException
 
 from app import ingestion as ingestion_module
 from app.auth import AuthenticatedUser
 from app import main as main_module
 from app import meta_client
 from app import real_investigation as pipeline
+from app.usage_quota import usage_status
 from app.execution import (
     UNSAFE_LOCAL_FLAG,
     DockerBackend,
@@ -836,17 +838,17 @@ def test_sync_debug_unsupported_project_shape(quota_db, monkeypatch, tmp_path):
         raise AssertionError("unsupported project must fail before execution")
 
     monkeypatch.setattr(main_module, "execute", must_not_execute)
-    result = main_module.start_real_investigation(
-        main_module.RealInvestigationRequest(ingestion_id=record["ingestion_id"]),
-        user,
-        quota_db,
-    )
-    assert result["status"] == "error"
-    assert result["reason"] == "unsupported_project"
-    assert result["message"] == (
-        f"Repository {record['profile']['name']} is not a supported Python project."
-    )
-    assert result["profile"]["commit_sha"] == FAKE_SHA
+    with pytest.raises(HTTPException) as exc_info:
+        main_module.start_real_investigation(
+            main_module.RealInvestigationRequest(ingestion_id=record["ingestion_id"]),
+            user,
+            quota_db,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "DEBUG_PYTHON_ONLY"
+    assert "Python" in exc_info.value.detail["message"]
+    assert usage_status(quota_db, user_id=str(user.id))["ai"]["used"] == 0
+    assert usage_status(quota_db, user_id=str(user.id))["debug"]["used"] == 0
 
 
 def test_api_route_registered_and_delegates(quota_db, monkeypatch, project_dir):

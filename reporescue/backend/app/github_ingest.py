@@ -16,11 +16,14 @@ Security properties:
 """
 
 import contextlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -32,6 +35,8 @@ ALLOWED_HOSTS = frozenset({"github.com", "www.github.com"})
 CLONE_TIMEOUT_SECONDS = 120
 GIT_COMMAND_TIMEOUT_SECONDS = 30
 ERROR_TAIL_CHARS = 800
+GITHUB_API_TIMEOUT_SECONDS = 5
+GITHUB_API_URL = "https://api.github.com/repos"
 
 # Extra path prefixes after owner/repo that are tolerated (and ignored) so
 # pasted tree/blob/commit page URLs still resolve to the repository.
@@ -134,6 +139,39 @@ def normalize_github_url(raw_url: str) -> NormalizedRepo:
     return NormalizedRepo(
         owner=owner, repo=repo, url=f"https://github.com/{owner}/{repo}"
     )
+
+
+def check_repo_visibility(owner: str, repo: str) -> str:
+    """Best-effort visibility probe: public, private_or_missing, unknown.
+
+    Unauthenticated: GitHub answers 404 for private repositories, so
+    404 means "private or genuinely missing" and is rejected without
+    cloning. Rate limits, network failures, and unexpected responses
+    yield 'unknown' so ingestion falls back to the clone attempt
+    instead of blocking on the API. Sends no credentials.
+    """
+    url = f"{GITHUB_API_URL}/{owner}/{repo}"
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "RepoRescue-Beta"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=GITHUB_API_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "private_or_missing"
+        return "unknown"
+    except (urllib.error.URLError, OSError, ValueError):
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    if payload.get("private") is True:
+        return "private_or_missing"
+    if payload.get("private") is False:
+        return "public"
+    return "unknown"
 
 
 def validate_ref(ref: str | None) -> str | None:

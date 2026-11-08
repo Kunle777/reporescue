@@ -24,4 +24,16 @@ describe("shared FastAPI client responses", () => {
       message: expect.stringContaining("invalid repository URL"),
     } satisfies Partial<ApiError>);
   });
+
+  it("carries structured backend codes with the backend message", async () => {
+    const response = new Response(
+      JSON.stringify({ detail: { code: "DEBUG_PYTHON_ONLY", message: "Debug is Python-only." } }),
+      { status: 422, headers: { "Content-Type": "application/json" } }
+    );
+    await expect(throwForStatus(response)).rejects.toMatchObject({
+      status: 422,
+      code: "DEBUG_PYTHON_ONLY",
+      message: "Debug is Python-only.",
+    } satisfies Partial<ApiError>);
+  });
 });

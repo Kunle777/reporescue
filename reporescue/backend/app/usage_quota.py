@@ -65,7 +65,22 @@ def _reserve_counter(
         raise UsageLimitExceeded(code, limit, reset_at)
 
 
-def reserve_global_call(db: Session) -> None:
+def _release_counter(
+    db: Session, *, scope: str, day: date, kind: str,
+) -> None:
+    # Refunds are best-effort and idempotent: a missing row or a
+    # zero counter simply has nothing to return. Callers guard
+    # double refunds with charged/refunded flags; the floor keeps
+    # concurrent refunds from driving the counter negative.
+    db.execute(text("""
+        UPDATE daily_usage_counters
+        SET used = used - 1
+        WHERE scope_key = :scope AND usage_date = :day
+          AND quota_type = :kind AND used > 0
+    """), {"scope": scope, "day": day, "kind": kind})
+
+
+def reserve_global_call(db: Session, *, commit: bool = True) -> None:
     """Reserve one shared application-wide slot for a Meta classification call."""
     day, reset_at = _today_and_reset()
     try:
@@ -74,7 +89,8 @@ def reserve_global_call(db: Session) -> None:
             limit=GLOBAL_AI_DAILY_LIMIT, code="GLOBAL_AI_DAILY_LIMIT_REACHED",
             reset_at=reset_at,
         )
-        db.commit()
+        if commit:
+            db.commit()
     except UsageLimitExceeded:
         db.rollback()
         raise
@@ -83,8 +99,20 @@ def reserve_global_call(db: Session) -> None:
         raise
 
 
+def release_global_call(db: Session, *, commit: bool = True) -> None:
+    """Return one shared application-wide slot (mirror of reserve)."""
+    day, _ = _today_and_reset()
+    try:
+        _release_counter(db, scope="__global__", day=day, kind="ai")
+        if commit:
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def reserve_operation(
-    db: Session, *, user_id: str, include_debug: bool = False
+    db: Session, *, user_id: str, include_debug: bool = False, commit: bool = True
 ) -> None:
     """Reserve one user AI operation, global AI slot, and optional Debug slot.
 
@@ -110,10 +138,35 @@ def reserve_operation(
                 limit=DEBUG_DAILY_USER_LIMIT, code="BETA_DAILY_DEBUG_LIMIT_REACHED",
                 reset_at=reset_at,
             )
-        db.commit()
+        if commit:
+            db.commit()
     except UsageLimitExceeded:
         db.rollback()
         raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+def release_operation(
+    db: Session, *, user_id: str, include_debug: bool = False, commit: bool = True
+) -> None:
+    """Return one user AI operation, global AI slot, and optional Debug slot.
+
+    Mirror of :func:`reserve_operation` for operations that failed
+    after reserving: provider errors, timeouts, late validation
+    failures, and worker-side terminal failures. Refunds target the
+    current Lagos day; a failure landing after midnight simply frees
+    a slot on the new day, which always favors the user.
+    """
+    day, _ = _today_and_reset()
+    try:
+        _release_counter(db, scope=f"user:{user_id}", day=day, kind="ai")
+        _release_counter(db, scope="__global__", day=day, kind="ai")
+        if include_debug:
+            _release_counter(db, scope=f"user:{user_id}", day=day, kind="debug")
+        if commit:
+            db.commit()
     except Exception:
         db.rollback()
         raise
